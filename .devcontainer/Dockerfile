@@ -1,7 +1,6 @@
 # from: https://github.com/devcontainers/images/blob/main/src/go/.devcontainer/Dockerfile
 
-ARG VARIANT=bullseye
-FROM golang:1-${VARIANT}
+FROM golang:1-bullseye
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -11,7 +10,7 @@ RUN curl https://packages.cloud.google.com/apt/doc/apt-key.gpg -o /usr/share/key
 
 # Hashicorp Terraform repo
 RUN curl -sSL https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $VARIANT main" | tee /etc/apt/sources.list.d/hashicorp.list
+    && echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com bullseye main" | tee /etc/apt/sources.list.d/hashicorp.list
 
 RUN apt-get update \
     && apt-get -y install \
