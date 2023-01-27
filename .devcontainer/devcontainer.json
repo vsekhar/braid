@@ -23,14 +23,20 @@
             "userGid": "1000",
             "upgradePackages": "true"
         },
-        "ghcr.io/devcontainers/features/go:1": {
-            "version": "none"
-        },
-        "ghcr.io/devcontainers/features/git:1": {
-            "version": "latest",
-            "ppa": "false"
-        },
+
+		// Go itself is installed in the base golang image, additional
+		// tools can be installed individually.
+        // "ghcr.io/devcontainers/features/go:1": {
+        //     "version": "none"
+        // },
+		
 		"ghcr.io/dhoeric/features/google-cloud-cli:1": {}
+
+		// Git is already included in base image golang
+        // "ghcr.io/devcontainers/features/git:1": {
+        //     "version": "latest",
+        //     "ppa": "false"
+        // }
     },
 
     "runArgs": [
