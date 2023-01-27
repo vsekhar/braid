@@ -29,7 +29,7 @@
         // "ghcr.io/devcontainers/features/go:1": {
         //     "version": "none"
         // },
-		
+
 		"ghcr.io/dhoeric/features/google-cloud-cli:1": {}
 
 		// Git is already included in base image golang
@@ -61,7 +61,9 @@
             },
             "extensions": [
                 "golang.Go",
-				"hashicorp.terraform"
+				"hashicorp.terraform",
+				"ms-azuretools.vscode-docker",
+				"eamodio.gitlens"
             ]
         }		
 	}
