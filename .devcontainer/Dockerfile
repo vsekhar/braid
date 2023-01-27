@@ -5,7 +5,7 @@ FROM golang:1-bullseye
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Google Cloud CLI repo
-RUN curl https://packages.cloud.google.com/apt/doc/apt-key.gpg -o /usr/share/keyrings/cloud.google.gpg \
+RUN curl -sSL https://packages.cloud.google.com/apt/doc/apt-key.gpg -o /usr/share/keyrings/cloud.google.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
 
 # Hashicorp Terraform repo
@@ -21,8 +21,7 @@ RUN apt-get update \
     && apt-get clean -y \
     && rm -rf /var/lib/apt/lists/*
 
-RUN go install \
-    google.golang.org/protobuf/cmd/protoc-gen-go@v1.28 \
-    google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.2
+RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.28
+RUN go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.2
 
 ENV DEBIAN_FRONTEND=dialog
