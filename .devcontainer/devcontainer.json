@@ -6,15 +6,10 @@
 
 {
 	"name": "braid-dev",
-
-	// Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
-	// "image": "mcr.microsoft.com/devcontainers/go:0-1.19",
 	"build": {
 		"dockerfile": "Dockerfile",
 		"context": "."
 	},
-
-	// Features to add to the dev container. More info: https://containers.dev/features.
     "features": {
         "ghcr.io/devcontainers/features/common-utils:2": {
             "installZsh": "true",
@@ -23,20 +18,7 @@
             "userGid": "1000",
             "upgradePackages": "true"
         },
-
-		// Go itself is installed in the base golang image, additional
-		// tools can be installed individually.
-        // "ghcr.io/devcontainers/features/go:1": {
-        //     "version": "none"
-        // },
-
 		"ghcr.io/dhoeric/features/google-cloud-cli:1": {}
-
-		// Git is already included in base image golang
-        // "ghcr.io/devcontainers/features/git:1": {
-        //     "version": "latest",
-        //     "ppa": "false"
-        // }
     },
 
     "runArgs": [
