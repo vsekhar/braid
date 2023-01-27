@@ -17,8 +17,7 @@
             "userUid": "1000",
             "userGid": "1000",
             "upgradePackages": "true"
-        },
-		"ghcr.io/dhoeric/features/google-cloud-cli:1": {}
+        }
     },
 
     "runArgs": [
