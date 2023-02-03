@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+option go_package = "github.com/vsekhar/braid/internal/peertls/internal/peertlspb";
+
+message Identity { 
+    bytes ed25519_public_key = 1;
+}
+
+message Secret {
+    bytes ed25519_private_key = 1;
+}

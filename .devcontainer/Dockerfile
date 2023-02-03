@@ -21,7 +21,13 @@ RUN apt-get update \
     && apt-get clean -y \
     && rm -rf /var/lib/apt/lists/*
 
-RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.28
-RUN go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.2
+# For protobuf
+RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.28 \
+    && go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.2
+
+# For VS Code Go extension
+RUN go install golang.org/x/tools/gopls@latest \
+    && go install golang.org/x/tools/dlv@latest \
+    && go install golang.org/x/tools/staticcheck@latest
 
 ENV DEBIAN_FRONTEND=dialog
