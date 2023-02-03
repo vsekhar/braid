@@ -107,16 +107,24 @@ func TestSelfIdentity(t *testing.T) {
 }
 
 func TestDifferentIdentity(t *testing.T) {
-	h1 := peertls.NewHost(peertls.NewIdentity())
-	h2 := peertls.NewHost(peertls.NewIdentity())
+	i1 := peertls.NewIdentity()
+	h1 := peertls.NewHost(i1)
+	i2 := peertls.NewIdentity()
+	h2 := peertls.NewHost(i2)
 	c1, c2 := connect(t, h1, h2)
-	i1, err := peertls.RemoteIdentity(c1)
+	ri1, err := peertls.RemoteIdentity(c1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	i2, err := peertls.RemoteIdentity(c2)
+	if !ri1.Equals(i2.Identity()) {
+		t.Error("expected matching identities, got different identities")
+	}
+	ri2, err := peertls.RemoteIdentity(c2)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !ri2.Equals(i1.Identity()) {
+		t.Error("expected matching identities, got different identities")
 	}
 	if i1.Equals(i2) {
 		t.Error("expected different identities, got identical identities")
