@@ -1,7 +1,6 @@
-package peertls
+package braid
 
 import (
-	"context"
 	"crypto/ed25519"
 	"crypto/tls"
 	"crypto/x509"
@@ -9,8 +8,6 @@ import (
 	"net"
 	"time"
 )
-
-const certTimeout = 72 * time.Hour
 
 var initialTLSConfig = &tls.Config{
 	// Require a cert, don't verify the cert chain
@@ -33,38 +30,6 @@ var initialTLSConfig = &tls.Config{
 	MinVersion: tls.VersionTLS13,
 }
 
-type Host struct {
-	i   *identity
-	s   *secret
-	cfg *tls.Config
-}
-
-func (h *Host) Dial(network, address string) (net.Conn, error) {
-	return h.DialContext(context.Background(), network, address)
-}
-
-func (h *Host) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
-	d := &tls.Dialer{Config: h.cfg}
-	c, err := d.DialContext(ctx, network, address)
-	if err != nil {
-		return nil, err
-	}
-	return c, nil
-}
-
-func (h *Host) Listen(network, address string) (net.Listener, error) {
-	return h.ListenContext(context.Background(), network, address)
-}
-func (h *Host) ListenContext(ctx context.Context, network, address string) (net.Listener, error) {
-	lcfg := &net.ListenConfig{}
-	netl, err := lcfg.Listen(ctx, network, address)
-	if err != nil {
-		netl.Close()
-		return nil, err
-	}
-	return tls.NewListener(netl, h.cfg), nil
-}
-
 func verifyX509Cert(cert *x509.Certificate) error {
 	if _, ok := cert.PublicKey.(ed25519.PublicKey); !ok {
 		return fmt.Errorf("expected ed25519.PublicKey, got %T", cert.PublicKey)
@@ -83,7 +48,6 @@ func verifyX509Cert(cert *x509.Certificate) error {
 	}
 	return nil
 }
-
 func RemoteIdentity(c net.Conn) (Identity, error) {
 	tlsConn, ok := c.(*tls.Conn)
 	if !ok {
@@ -107,23 +71,4 @@ func RemoteIdentity(c net.Conn) (Identity, error) {
 	}
 
 	return &identity{pub: cert.PublicKey.(ed25519.PublicKey)}, nil
-}
-
-func NewHost(s Secret) *Host {
-	h := &Host{
-		i:   s.Identity().(*identity),
-		s:   s.(*secret),
-		cfg: initialTLSConfig.Clone(),
-	}
-
-	// Generate certificates dynamically to handle timeouts and to support
-	// renegotiation in the TLS stack.
-	h.cfg.GetCertificate = func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-		return h.s.certificate(), nil
-	}
-	h.cfg.GetClientCertificate = func(req *tls.CertificateRequestInfo) (*tls.Certificate, error) {
-		// TODO: do I need to populate Certificate.Certificate?
-		return h.s.certificate(), nil
-	}
-	return h
 }

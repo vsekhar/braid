@@ -1,4 +1,4 @@
-package peertls_test
+package braid_test
 
 import (
 	"bytes"
@@ -8,10 +8,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/vsekhar/braid/internal/peertls"
+	"github.com/vsekhar/braid"
 )
 
-func connect(t *testing.T, h1, h2 *peertls.Host) (c1, c2 net.Conn) {
+func connect(t *testing.T, h1, h2 *braid.Transport) (c1, c2 net.Conn) {
 	l, err := h1.Listen("tcp", ":0")
 	if err != nil {
 		t.Fatal(err)
@@ -71,62 +71,57 @@ func sendAndCheckData(t *testing.T, c1, c2 net.Conn) {
 }
 
 func TestSelfConnection(t *testing.T) {
-	s := peertls.NewIdentity()
-	h := peertls.NewHost(s)
-	c1, c2 := connect(t, h, h)
+	s := braid.NewIdentity()
+	transport := braid.NewTransport(s)
+	c1, c2 := connect(t, transport, transport)
 	defer c1.Close()
 	defer c2.Close()
 	sendAndCheckData(t, c1, c2)
 }
 
 func TestDifferentConnect(t *testing.T) {
-	h1 := peertls.NewHost(peertls.NewIdentity())
-	h2 := peertls.NewHost(peertls.NewIdentity())
-	c1, c2 := connect(t, h1, h2)
+	transport1 := braid.NewTransport(braid.NewIdentity())
+	transport2 := braid.NewTransport(braid.NewIdentity())
+	c1, c2 := connect(t, transport1, transport2)
 	defer c1.Close()
 	defer c2.Close()
 	sendAndCheckData(t, c1, c2)
 }
 
 func TestSelfIdentity(t *testing.T) {
-	h := peertls.NewHost(peertls.NewIdentity())
-	c1, c2 := connect(t, h, h)
-	i1, err := peertls.RemoteIdentity(c1)
+	transport := braid.NewTransport(braid.NewIdentity())
+	c1, c2 := connect(t, transport, transport)
+	i1, err := braid.RemoteIdentity(c1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	i2, err := peertls.RemoteIdentity(c2)
+	i2, err := braid.RemoteIdentity(c2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !i1.Equals(i2) {
-		s1, _ := i1.DebugMarshalText()
-		s2, _ := i2.DebugMarshalText()
-		t.Errorf("differing identities: %s and %s", s1, s2)
+		t.Errorf("differing identities: %+v and %+v", i1, i2)
 	}
 }
 
 func TestDifferentIdentity(t *testing.T) {
-	i1 := peertls.NewIdentity()
-	h1 := peertls.NewHost(i1)
-	i2 := peertls.NewIdentity()
-	h2 := peertls.NewHost(i2)
-	c1, c2 := connect(t, h1, h2)
-	ri1, err := peertls.RemoteIdentity(c1)
+	i1 := braid.NewIdentity()
+	transport1 := braid.NewTransport(i1)
+	i2 := braid.NewIdentity()
+	transport2 := braid.NewTransport(i2)
+	c1, c2 := connect(t, transport1, transport2)
+	ri1, err := braid.RemoteIdentity(c1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !ri1.Equals(i2.Identity()) {
 		t.Error("expected matching identities, got different identities")
 	}
-	ri2, err := peertls.RemoteIdentity(c2)
+	ri2, err := braid.RemoteIdentity(c2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !ri2.Equals(i1.Identity()) {
 		t.Error("expected matching identities, got different identities")
-	}
-	if i1.Equals(i2) {
-		t.Error("expected different identities, got identical identities")
 	}
 }

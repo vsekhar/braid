@@ -4,7 +4,7 @@
         "path": "/usr/bin/protoc",
         "compile_on_save": true,
         "options": [
-            "--proto_path=${workspaceRoot}/internal/peertls/internal/peertlspb",
+            "--proto_path=${workspaceRoot}/api",
             "--go_out=.",
             "--go_opt=module=github.com/vsekhar/braid",
             "--go-grpc_out=.",

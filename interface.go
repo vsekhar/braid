@@ -1,8 +1,4 @@
-package peertls
-
-import (
-	"encoding"
-)
+package braid
 
 // Identity is a public reference to a specific peer.
 //
@@ -13,8 +9,6 @@ import (
 // the application to determine if the peer presenting an Identity is
 // trustworthy.
 type Identity interface {
-	marshalable
-
 	// Equals returns true if and only if the Identities are equal.
 	Equals(q Identity) bool
 }
@@ -24,21 +18,6 @@ type Identity interface {
 // Secret is conceptually similar to a cryptographic private key and should not
 // be shared.
 type Secret interface {
-	marshalable
-
+	// Identity returns the shareable Identity corresponding to this Secret.
 	Identity() Identity
-	Equals(s Secret) bool
-}
-
-type marshalable interface {
-	encoding.BinaryMarshaler
-	encoding.BinaryUnmarshaler
-
-	// This package uses protobufs under the hood and proto text encodings are
-	// not stable, so we use Debug* methods rather than encoding.TextMarshaler
-	// and encoding.TextUnmarshaler to help prevent accidental reliance on
-	// text encodings for canonical serialization.
-
-	DebugMarshalText() (text []byte, err error)
-	DebugUnmarshalText(text []byte) error
 }
