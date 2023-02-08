@@ -1,0 +1,32 @@
+{
+    "files.trimTrailingWhitespace": true,
+    "files.trimFinalNewlines": true,
+    "files.insertFinalNewline": true,
+    "files.associations": {
+        "*.sdl": "sql",
+    },
+    "[sql]": {
+        "editor.rulers": [80],
+    },
+    "[markdown]": {
+        "editor.rulers": [80],
+    },
+    "[go]": {
+        "editor.rulers": [80],
+    },
+    "[proto3]": {
+        "editor.rulers": [80],
+    },
+    "protoc": {
+        "path": "/usr/bin/protoc",
+        "compile_on_save": true,
+        "options": [
+            "--proto_path=${workspaceRoot}/api",
+            "--go_out=.",
+            "--go_opt=module=github.com/vsekhar/braid",
+            "--go-grpc_out=.",
+            "--go-grpc_opt=module=github.com/vsekhar/${workspaceFolderBasename}",
+        ]
+    },
+    "go.testFlags": ["-v"],
+}
