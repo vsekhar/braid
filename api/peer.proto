@@ -1,0 +1,10 @@
+syntax = "proto3";
+package braid;
+
+option go_package = "github.com/vsekhar/braid/pkg/api/braidpb";
+
+message Peer {
+    // TODO
+}
+
+message RequestPeers {}
