@@ -19,7 +19,7 @@ func TestFrameStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	buf := bytes.NewBuffer(b)
-	f2, err := framestream.ReadFrame(buf)
+	f2, err := framestream.ReadFrameFrom(buf)
 	if err != nil {
 		t.Fatal(err)
 	}

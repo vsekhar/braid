@@ -6,9 +6,55 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/vsekhar/braid/internal/errorprinter"
 	pb "github.com/vsekhar/braid/pkg/api/braidpb"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
+
+func init() {
+	sanityCheckProtoDef(errorprinter.Panicker{})
+}
+
+func sanityCheckProtoDef(ep errorprinter.Interface) {
+	f := &pb.Frame{}
+	fields := f.ProtoReflect().Descriptor().Fields()
+	if fields.Len() == 0 {
+		// technically valid if intentional, but highly unlikely to be.
+		ep.Error("empty frame message")
+	}
+
+	// Get the oneof descriptor from the first field.
+	first := fields.Get(0)
+	oneOf := first.ContainingOneof()
+	if oneOf == nil || oneOf.IsPlaceholder() || oneOf.IsSynthetic() {
+		ep.Errorf("found field not in a oneof: %s", first.FullName())
+	}
+
+	// Ensure all other fields are part of the same oneof.
+	var oneOfName string
+	for i := 1; i < fields.Len(); i++ {
+		field := fields.Get(i)
+		o := field.ContainingOneof()
+
+		// In a oneof.
+		if o == nil {
+			ep.Errorf("found field not in a oneof: %s", field.FullName())
+		}
+
+		// In the *same* oneof.
+		if oneOfName == "" {
+			oneOfName = string(o.FullName())
+		} else if string(o.FullName()) != oneOfName {
+			ep.Errorf("multiple oneofs found: %s and %s", o.FullName(), oneOf.FullName())
+		}
+
+		// Of kind message.
+		if field.Kind() != protoreflect.MessageKind {
+			ep.Errorf("expected field of message type, got %s of type %s", field.FullName(), field.Kind().String())
+		}
+	}
+}
 
 func readUvarint(r io.Reader) (uint64, error) {
 
@@ -28,7 +74,7 @@ func readUvarint(r io.Reader) (uint64, error) {
 	return binary.ReadUvarint(bytes.NewBuffer(buf))
 }
 
-func ReadFrame(r io.Reader) (*pb.Frame, error) {
+func ReadFrameFrom(r io.Reader) (*pb.Frame, error) {
 	buf := &bytes.Buffer{}
 	t := io.TeeReader(r, buf)
 

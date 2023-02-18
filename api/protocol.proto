@@ -1,10 +1,10 @@
 syntax = "proto3";
+
 package braid;
 
 option go_package = "github.com/vsekhar/braid/pkg/api/braidpb";
 
-import "message.proto";
-import "peer.proto";
+import "braid.proto";
 
 message Frame {
 
@@ -13,7 +13,7 @@ message Frame {
     // producing a stream of heterogenous messages. So we can construct a
     // self-delimiting message by ensuring it only ever contains on the wire one
     // populated field, and that field is of protobuf message type. These
-    // properties of Frame are verified in internal/framestream/proto_test.go.
+    // properties of Frame are verified in tests and at package initialization.
     //
     // The benefit of this approach is that we can simply construct and write
     // out frames to a stream and we can re-use protobufs existing machinery
@@ -34,3 +34,26 @@ message Frame {
 }
 
 message NoOp {}
+
+message FrontierRef {
+    // Nodes should order messagerefs in messages as described in MessageSetRef
+    // and not in the order of the node's frontier parent table since this would
+    // leak the bookkeepping work for other nodes to exploit.
+    MessageSetRef messages = 1;
+}
+
+message RequestMessages {
+    repeated MessageRef want = 1;
+
+    // Optional frontier of the requesting node so that the responding node can
+    // also send other messages the requesting node might need (e.g. the
+    // transitive parents of the messages in want).
+    FrontierRef frontier = 2;
+}
+
+message Peer {
+    string address = 1;
+    Identity identity = 2; // optional, validate if provided
+}
+
+message RequestPeers {}

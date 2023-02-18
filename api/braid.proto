@@ -1,0 +1,135 @@
+syntax = "proto3";
+
+package braid;
+
+option go_package = "github.com/vsekhar/braid/pkg/api/braidpb";
+
+import "google/protobuf/timestamp.proto";
+
+message Message {
+    Authorship authorship = 1;
+    google.protobuf.Timestamp timestamp = 2;
+    Parentage parentage = 3;
+    Payload data = 4;
+}
+
+// Identity is a public reference to a specific peer.
+//
+// Identity is conceptually similar to a cryptographic public key and can be
+// shared freely.
+//
+// Identity is not validated or signed by any other authority and it is up to
+// the application to determine if the peer presenting an Identity is
+// trustworthy.
+message Identity {
+    bytes ed25519_public_key = 1;
+}
+
+// Secret is a private value that can be used by a node to act as an Identity.
+//
+// Secret is conceptually similar to a cryptographic private key and should not
+// be shared.
+message Secret {
+    bytes ed25519_private_key = 1;
+}
+
+message Signature {
+    bytes ed25519_v1 = 1;  // == sign(Ref(Message).shake256_64_v1)
+}
+
+// Authorship identifies a particular message author and the committed state
+// that author was in when authoring a given message.
+message Authorship {
+    Identity identity = 1;
+    Signature signature = 2;
+    PostCommitment post_commitment = 3;
+    PreCommitment pre_commitment = 4;
+}
+
+// MessageRef uniquely identifies a message in a braid.
+//
+// MessageRef must be derived entirely from the contents of a single Message and
+// must not require looking up any referred Messages. This allows MessageRef to
+// refer to orphans that a node has not yet linked into a braid.
+message MessageRef {
+    // shake256_64_v1 for a message is the SHAKE256 hash obtained by writing
+    // the following in order to a sponge:
+    //
+    //   1) message.authorship.identity.ed25519_public_key
+    //        - omitted: signature (would be circular dependancy)
+    //   2) message.authorship.post_commitment
+    //        .timestamp
+    //        .messages
+    //        .state
+    //   3) message.authorship.pre_commitment.payload_refs[]
+    //   4) message.timestamp
+    //        - little-endian UTC seconds since Unix epoch (8 bytes)
+    //        - little-endian UTC nanoseconds (4 bytes)
+    //   3) message.parentage.parents[i].ref.shake256_64_v1
+    //        - omitted: contribution (validated on receipt of message)
+    //   4) message.data.data
+    //
+    // Output of 64 bytes is then obtained from the sponge.
+    //
+    // No data is written for a field that is empty or the zero timestamp. As
+    // a result, the shake256_64_v1 for the genesis message is simply 64 bytes
+    // of output read from an initialized SHAKE256 sponge.
+    bytes shake256_64_v1 = 1;
+}
+
+message MessageSetRef {
+    // shake256_64_v1 for a set of messages is the SHAKE256 hash of the Ref's of
+    // each of the messages in the set.
+    //
+    // The set is ordered first by increasing timestamp, and ties are broken by
+    // increasing message hash value (Ref(message).shake256_64_v1).
+    bytes shake256_64_v1 = 1;
+}
+
+// PostCommitment commits an author to a particular historical state of the
+// braid and the application.
+message PostCommitment {
+    // Cut defines a boundary in the braid that splits all messages into either
+    // a "prior" side (timestamps < cut) or "recent" side (timestamps >= cut).
+    google.protobuf.Timestamp cut = 1;
+
+    // Messages refers to the ordered set of orphans resulting from removing
+    // messages on the prior side of the cut; i.e. messages on the recent side
+    // with one or more parents on the prior side.
+    MessageSetRef messages = 2;
+
+    // state is an application-defined state after applying all messages on the
+    // prior side of the cut to the application.
+    StateRef state = 3;
+}
+
+// Precommitment commits an author to a particular set of future payloads.
+message PreCommitment {
+    repeated PayloadRef payload_refs = 1;
+}
+
+message Parentage {
+    repeated ParentRef parents = 1;
+}
+
+message ParentRef {
+    MessageRef ref = 1;
+    uint64 contribution = 2;
+}
+
+// StateRef is a reference to a state of the application after processing a
+// set of messages.
+message StateRef {
+    bytes ref = 1;
+}
+
+message Payload {
+    bytes data = 1;
+
+    // Message containing a precommitment matching hash(data)
+    MessageRef msg = 2;
+}
+
+message PayloadRef {
+    bytes shake256_64_v1 = 1; // SHAKE256(payload.data) --> 64 bytes output
+}
