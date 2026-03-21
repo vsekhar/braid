@@ -1,0 +1,48 @@
+// Braid protocol buffer definitions
+
+edition = "2023";
+
+option go_package = "github.com/vsekhar/braid";
+
+package braid;
+
+import "google/protobuf/timestamp.proto";
+
+// MessageRef identifies a message by a versioned hash.
+//
+// Each field represents a distinct hashing scheme (fields included and
+// algorithm used). Only one field should be set. Old schemes can be retired
+// using 'reserved' or the 'deprecated' annotation.
+message MessageRef {
+  bytes sha256_v1 = 1;
+}
+
+// PublicKey identifies an author. Each field represents a distinct key
+// algorithm. Only one field should be set.
+message PublicKey {
+  bytes ed25519_v1 = 1;
+}
+
+// Signature is a cryptographic signature over a message. Each field
+// represents a distinct signing scheme. Only one field should be set.
+message Signature {
+  bytes ed25519_v1 = 1;
+}
+
+// ParentTable is an ordered list of parents and the count of additional
+// messages reachable from each.
+message ParentTable {
+  message Entry {
+    MessageRef parent = 1;
+    uint64 message_count = 2;
+  }
+  repeated Entry entries = 1;
+}
+
+// Message is a single entry in the hash chain.
+message Message {
+  google.protobuf.Timestamp timestamp = 1;
+  ParentTable parents = 2;
+  PublicKey author = 3;
+  Signature signature = 4;
+}
