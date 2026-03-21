@@ -188,6 +188,69 @@ func (s *Store) Wanted() []*MessageRef {
 	return out
 }
 
+const maxResolve = 1000
+
+// Resolve walks backward from the wanted refs through incorporated and
+// pending messages, stopping at refs in the frontier set or when the walk
+// cap is reached. Returns the collected messages (no particular order).
+// The caller streams these to the requesting node.
+func (s *Store) Resolve(wanted []*MessageRef, frontier []*MessageRef) []*Message {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Build frontier lookup set.
+	stop := make(map[string]struct{}, len(frontier))
+	for _, ref := range frontier {
+		stop[refKey(ref)] = struct{}{}
+	}
+
+	visited := make(map[string]struct{})
+	var result []*Message
+
+	// BFS backward from wanted.
+	queue := make([]string, 0, len(wanted))
+	for _, ref := range wanted {
+		k := refKey(ref)
+		if _, ok := visited[k]; ok {
+			continue
+		}
+		if _, ok := stop[k]; ok {
+			continue
+		}
+		visited[k] = struct{}{}
+		queue = append(queue, k)
+	}
+
+	for len(queue) > 0 && len(result) < maxResolve {
+		k := queue[0]
+		queue = queue[1:]
+
+		msg, ok := s.messages[k]
+		if !ok {
+			msg, ok = s.pending[k]
+		}
+		if !ok {
+			continue // we don't have this message
+		}
+		result = append(result, msg)
+
+		// Walk backward through parents.
+		for _, entry := range msg.GetParents().GetEntries() {
+			pk := refKey(entry.GetParent())
+			if _, ok := visited[pk]; ok {
+				continue
+			}
+			if _, ok := stop[pk]; ok {
+				continue
+			}
+			visited[pk] = struct{}{}
+			queue = append(queue, pk)
+		}
+	}
+
+	return result
+}
+
 // Len returns the number of incorporated messages.
 func (s *Store) Len() int {
 	s.mu.RLock()

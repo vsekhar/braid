@@ -67,6 +67,14 @@ message PeerGossip {
   repeated PeerInfo peers = 1;
 }
 
+// MessageRequest is sent by a node to request messages it needs.
+// The responding node walks backward from the wanted refs, stopping
+// at the requester's frontier, and streams back any messages it has.
+message MessageRequest {
+  repeated MessageRef wanted = 1;
+  repeated MessageRef frontier = 2;
+}
+
 // Envelope is the wire format for peer-to-peer communication.
 // Each envelope is sent as a 4-byte big-endian length prefix followed
 // by the serialized Envelope bytes.
@@ -74,5 +82,6 @@ message Envelope {
   oneof body {
     Message message = 1;
     PeerGossip peer_gossip = 2;
+    MessageRequest message_request = 3;
   }
 }

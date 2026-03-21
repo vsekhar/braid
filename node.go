@@ -12,6 +12,7 @@ import (
 
 const gossipInterval = 7 * time.Second
 const connectInterval = 3 * time.Second
+const wantedInterval = 5 * time.Second
 const targetConnections = 5
 const targetConnectionsEpsilon = 2
 
@@ -121,6 +122,11 @@ func (n *Node) Run(ctx context.Context) error {
 		n.connectLoop(ctx)
 	})
 
+	// Wanted request loop.
+	n.wg.Go(func() {
+		n.wantedLoop(ctx)
+	})
+
 	<-ctx.Done()
 	n.listener.Close()
 	// Close all peer connections so read loops unblock.
@@ -186,6 +192,8 @@ func (n *Node) readLoop(p *Peer) {
 			n.handleMessage(body.Message)
 		case *Envelope_PeerGossip:
 			n.handleGossip(body.PeerGossip)
+		case *Envelope_MessageRequest:
+			n.handleMessageRequest(p, body.MessageRequest)
 		}
 	}
 }
@@ -212,6 +220,61 @@ func (n *Node) handleGossip(gossip *PeerGossip) {
 		if n.directory.Add(pi.Key, pi.GetAddress()) {
 			n.logger.Info("learned peer", "peer", publicKeyID(pi.Key)[:8])
 		}
+	}
+}
+
+func (n *Node) handleMessageRequest(p *Peer, req *MessageRequest) {
+	msgs := n.store.Resolve(req.Wanted, req.Frontier)
+	if len(msgs) == 0 {
+		return
+	}
+	n.logger.Info("resolving wanted", "peer", publicKeyID(p.Key)[:8], "sending", len(msgs))
+	for _, msg := range msgs {
+		env := &Envelope{
+			Body: &Envelope_Message{Message: msg},
+		}
+		if err := p.Send(env); err != nil {
+			n.logger.Error("resolve send failed", "peer", publicKeyID(p.Key)[:8], "err", err)
+			return
+		}
+	}
+}
+
+func (n *Node) wantedLoop(ctx context.Context) {
+	ticker := time.NewTicker(wantedInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			n.sendMessageRequest()
+		}
+	}
+}
+
+func (n *Node) sendMessageRequest() {
+	wanted := n.store.Wanted()
+	if len(wanted) == 0 {
+		return
+	}
+	p := n.peers.Random()
+	if p == nil {
+		return
+	}
+	frontier := n.store.Frontier()
+	env := &Envelope{
+		Body: &Envelope_MessageRequest{
+			MessageRequest: &MessageRequest{
+				Wanted:   wanted,
+				Frontier: frontier,
+			},
+		},
+	}
+	n.logger.Info("sending wanted request", "peer", publicKeyID(p.Key)[:8],
+		"wanted", len(wanted), "frontier", len(frontier))
+	if err := p.Send(env); err != nil {
+		n.logger.Error("wanted request send failed", "peer", publicKeyID(p.Key)[:8], "err", err)
 	}
 }
 
