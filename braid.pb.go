@@ -30,8 +30,17 @@ const (
 // algorithm used). Only one field should be set. Old schemes can be retired
 // using 'reserved' or the 'deprecated' annotation.
 type MessageRef struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Sha256V1      []byte                 `protobuf:"bytes,1,opt,name=sha256_v1,json=sha256V1" json:"sha256_v1,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// sha256_v1: SHA-256 over the following fields of Message, using
+	// explicit fixed-width big-endian encodings (not protobuf serialization):
+	//
+	//   - timestamp: int64 seconds || int32 nanos
+	//   - author: ed25519_v1 public key bytes (32 bytes)
+	//   - parent table: for each entry in order:
+	//     parent sha256_v1 (32 bytes) || uint64 message_count
+	//
+	// The signature field is excluded.
+	Sha256V1      []byte `protobuf:"bytes,1,opt,name=sha256_v1,json=sha256V1" json:"sha256_v1,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -280,6 +289,189 @@ func (x *Message) GetSignature() *Signature {
 	return nil
 }
 
+// PeerInfo identifies a peer by its public key and listen address.
+type PeerInfo struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Key           *PublicKey             `protobuf:"bytes,1,opt,name=key" json:"key,omitempty"`
+	Address       *string                `protobuf:"bytes,2,opt,name=address" json:"address,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PeerInfo) Reset() {
+	*x = PeerInfo{}
+	mi := &file_braid_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PeerInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PeerInfo) ProtoMessage() {}
+
+func (x *PeerInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_braid_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PeerInfo.ProtoReflect.Descriptor instead.
+func (*PeerInfo) Descriptor() ([]byte, []int) {
+	return file_braid_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *PeerInfo) GetKey() *PublicKey {
+	if x != nil {
+		return x.Key
+	}
+	return nil
+}
+
+func (x *PeerInfo) GetAddress() string {
+	if x != nil && x.Address != nil {
+		return *x.Address
+	}
+	return ""
+}
+
+// PeerGossip is a push-only list of known peers.
+type PeerGossip struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Peers         []*PeerInfo            `protobuf:"bytes,1,rep,name=peers" json:"peers,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PeerGossip) Reset() {
+	*x = PeerGossip{}
+	mi := &file_braid_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PeerGossip) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PeerGossip) ProtoMessage() {}
+
+func (x *PeerGossip) ProtoReflect() protoreflect.Message {
+	mi := &file_braid_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PeerGossip.ProtoReflect.Descriptor instead.
+func (*PeerGossip) Descriptor() ([]byte, []int) {
+	return file_braid_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *PeerGossip) GetPeers() []*PeerInfo {
+	if x != nil {
+		return x.Peers
+	}
+	return nil
+}
+
+// Envelope is the wire format for peer-to-peer communication.
+// Each envelope is sent as a 4-byte big-endian length prefix followed
+// by the serialized Envelope bytes.
+type Envelope struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Body:
+	//
+	//	*Envelope_Message
+	//	*Envelope_PeerGossip
+	Body          isEnvelope_Body `protobuf_oneof:"body"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Envelope) Reset() {
+	*x = Envelope{}
+	mi := &file_braid_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Envelope) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Envelope) ProtoMessage() {}
+
+func (x *Envelope) ProtoReflect() protoreflect.Message {
+	mi := &file_braid_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Envelope.ProtoReflect.Descriptor instead.
+func (*Envelope) Descriptor() ([]byte, []int) {
+	return file_braid_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *Envelope) GetBody() isEnvelope_Body {
+	if x != nil {
+		return x.Body
+	}
+	return nil
+}
+
+func (x *Envelope) GetMessage() *Message {
+	if x != nil {
+		if x, ok := x.Body.(*Envelope_Message); ok {
+			return x.Message
+		}
+	}
+	return nil
+}
+
+func (x *Envelope) GetPeerGossip() *PeerGossip {
+	if x != nil {
+		if x, ok := x.Body.(*Envelope_PeerGossip); ok {
+			return x.PeerGossip
+		}
+	}
+	return nil
+}
+
+type isEnvelope_Body interface {
+	isEnvelope_Body()
+}
+
+type Envelope_Message struct {
+	Message *Message `protobuf:"bytes,1,opt,name=message,oneof"`
+}
+
+type Envelope_PeerGossip struct {
+	PeerGossip *PeerGossip `protobuf:"bytes,2,opt,name=peer_gossip,json=peerGossip,oneof"`
+}
+
+func (*Envelope_Message) isEnvelope_Body() {}
+
+func (*Envelope_PeerGossip) isEnvelope_Body() {}
+
 type ParentTable_Entry struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Parent        *MessageRef            `protobuf:"bytes,1,opt,name=parent" json:"parent,omitempty"`
@@ -290,7 +482,7 @@ type ParentTable_Entry struct {
 
 func (x *ParentTable_Entry) Reset() {
 	*x = ParentTable_Entry{}
-	mi := &file_braid_proto_msgTypes[5]
+	mi := &file_braid_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -302,7 +494,7 @@ func (x *ParentTable_Entry) String() string {
 func (*ParentTable_Entry) ProtoMessage() {}
 
 func (x *ParentTable_Entry) ProtoReflect() protoreflect.Message {
-	mi := &file_braid_proto_msgTypes[5]
+	mi := &file_braid_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -355,7 +547,18 @@ const file_braid_proto_rawDesc = "" +
 	"\ttimestamp\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\x12,\n" +
 	"\aparents\x18\x02 \x01(\v2\x12.braid.ParentTableR\aparents\x12(\n" +
 	"\x06author\x18\x03 \x01(\v2\x10.braid.PublicKeyR\x06author\x12.\n" +
-	"\tsignature\x18\x04 \x01(\v2\x10.braid.SignatureR\tsignatureB\x1aZ\x18github.com/vsekhar/braidb\beditionsp\xe8\a"
+	"\tsignature\x18\x04 \x01(\v2\x10.braid.SignatureR\tsignature\"H\n" +
+	"\bPeerInfo\x12\"\n" +
+	"\x03key\x18\x01 \x01(\v2\x10.braid.PublicKeyR\x03key\x12\x18\n" +
+	"\aaddress\x18\x02 \x01(\tR\aaddress\"3\n" +
+	"\n" +
+	"PeerGossip\x12%\n" +
+	"\x05peers\x18\x01 \x03(\v2\x0f.braid.PeerInfoR\x05peers\"t\n" +
+	"\bEnvelope\x12*\n" +
+	"\amessage\x18\x01 \x01(\v2\x0e.braid.MessageH\x00R\amessage\x124\n" +
+	"\vpeer_gossip\x18\x02 \x01(\v2\x11.braid.PeerGossipH\x00R\n" +
+	"peerGossipB\x06\n" +
+	"\x04bodyB\x1aZ\x18github.com/vsekhar/braidb\beditionsp\xe8\a"
 
 var (
 	file_braid_proto_rawDescOnce sync.Once
@@ -369,28 +572,35 @@ func file_braid_proto_rawDescGZIP() []byte {
 	return file_braid_proto_rawDescData
 }
 
-var file_braid_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_braid_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_braid_proto_goTypes = []any{
 	(*MessageRef)(nil),            // 0: braid.MessageRef
 	(*PublicKey)(nil),             // 1: braid.PublicKey
 	(*Signature)(nil),             // 2: braid.Signature
 	(*ParentTable)(nil),           // 3: braid.ParentTable
 	(*Message)(nil),               // 4: braid.Message
-	(*ParentTable_Entry)(nil),     // 5: braid.ParentTable.Entry
-	(*timestamppb.Timestamp)(nil), // 6: google.protobuf.Timestamp
+	(*PeerInfo)(nil),              // 5: braid.PeerInfo
+	(*PeerGossip)(nil),            // 6: braid.PeerGossip
+	(*Envelope)(nil),              // 7: braid.Envelope
+	(*ParentTable_Entry)(nil),     // 8: braid.ParentTable.Entry
+	(*timestamppb.Timestamp)(nil), // 9: google.protobuf.Timestamp
 }
 var file_braid_proto_depIdxs = []int32{
-	5, // 0: braid.ParentTable.entries:type_name -> braid.ParentTable.Entry
-	6, // 1: braid.Message.timestamp:type_name -> google.protobuf.Timestamp
-	3, // 2: braid.Message.parents:type_name -> braid.ParentTable
-	1, // 3: braid.Message.author:type_name -> braid.PublicKey
-	2, // 4: braid.Message.signature:type_name -> braid.Signature
-	0, // 5: braid.ParentTable.Entry.parent:type_name -> braid.MessageRef
-	6, // [6:6] is the sub-list for method output_type
-	6, // [6:6] is the sub-list for method input_type
-	6, // [6:6] is the sub-list for extension type_name
-	6, // [6:6] is the sub-list for extension extendee
-	0, // [0:6] is the sub-list for field type_name
+	8,  // 0: braid.ParentTable.entries:type_name -> braid.ParentTable.Entry
+	9,  // 1: braid.Message.timestamp:type_name -> google.protobuf.Timestamp
+	3,  // 2: braid.Message.parents:type_name -> braid.ParentTable
+	1,  // 3: braid.Message.author:type_name -> braid.PublicKey
+	2,  // 4: braid.Message.signature:type_name -> braid.Signature
+	1,  // 5: braid.PeerInfo.key:type_name -> braid.PublicKey
+	5,  // 6: braid.PeerGossip.peers:type_name -> braid.PeerInfo
+	4,  // 7: braid.Envelope.message:type_name -> braid.Message
+	6,  // 8: braid.Envelope.peer_gossip:type_name -> braid.PeerGossip
+	0,  // 9: braid.ParentTable.Entry.parent:type_name -> braid.MessageRef
+	10, // [10:10] is the sub-list for method output_type
+	10, // [10:10] is the sub-list for method input_type
+	10, // [10:10] is the sub-list for extension type_name
+	10, // [10:10] is the sub-list for extension extendee
+	0,  // [0:10] is the sub-list for field type_name
 }
 
 func init() { file_braid_proto_init() }
@@ -398,13 +608,17 @@ func file_braid_proto_init() {
 	if File_braid_proto != nil {
 		return
 	}
+	file_braid_proto_msgTypes[7].OneofWrappers = []any{
+		(*Envelope_Message)(nil),
+		(*Envelope_PeerGossip)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_braid_proto_rawDesc), len(file_braid_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

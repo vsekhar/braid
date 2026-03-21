@@ -10,6 +10,11 @@ import (
 	"time"
 )
 
+const gossipInterval = 7 * time.Second
+const connectInterval = 3 * time.Second
+const targetConnections = 5
+const targetConnectionsEpsilon = 2
+
 // NodeConfig configures a Node.
 type NodeConfig struct {
 	ListenAddr     string
@@ -20,10 +25,13 @@ type NodeConfig struct {
 
 // Node is a braid protocol participant that listens for and dials peers.
 type Node struct {
-	cfg      NodeConfig
-	listener *Listener
-	peers    *PeerSet
-	logger   *slog.Logger
+	cfg       NodeConfig
+	listener  *Listener
+	peers     *PeerSet       // currently connected peers
+	directory *PeerDirectory // all known peers (connected or not)
+	selfID    string
+	wg        sync.WaitGroup
+	logger    *slog.Logger
 }
 
 // NewNode creates a Node. Call Run to start it.
@@ -38,11 +46,14 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 	if err != nil {
 		return nil, err
 	}
+	selfID := publicKeyID(cfg.Identity.PublicKey())[:8]
 	return &Node{
-		cfg:      cfg,
-		listener: ln,
-		peers:    NewPeerSet(),
-		logger:   slog.Default(),
+		cfg:       cfg,
+		listener:  ln,
+		peers:     NewPeerSet(),
+		directory: NewPeerDirectory(),
+		logger:    slog.Default().With("node", selfID),
+		selfID:    selfID,
 	}, nil
 }
 
@@ -56,13 +67,16 @@ func (n *Node) Peers() []*Peer {
 	return n.peers.All()
 }
 
+// Directory returns the node's peer directory.
+func (n *Node) Directory() *PeerDirectory {
+	return n.directory
+}
+
 // Run starts accepting connections and connects to bootstrap peers.
 // It blocks until ctx is canceled.
 func (n *Node) Run(ctx context.Context) error {
-	var wg sync.WaitGroup
-
 	// Accept loop.
-	wg.Go(func() {
+	n.wg.Go(func() {
 		for {
 			conn, err := n.listener.Accept()
 			if err != nil {
@@ -72,23 +86,36 @@ func (n *Node) Run(ctx context.Context) error {
 				n.logger.Error("accept error", "err", err)
 				continue
 			}
-			n.addPeer(conn)
+			n.addPeer(conn, "")
 		}
 	})
 
 	// Connect to bootstrap peers.
 	for _, addr := range n.cfg.BootstrapPeers {
-		wg.Go(func() {
+		n.wg.Go(func() {
 			if err := n.Connect(ctx, addr); err != nil {
-				n.logger.Error("bootstrap connect failed", "addr", addr, "err", err)
+				n.logger.Error("bootstrap connect failed", "err", err)
 			}
 		})
 	}
 
-	// Wait for context cancellation.
+	// Gossip loop.
+	n.wg.Go(func() {
+		n.gossipLoop(ctx)
+	})
+
+	// Connection maintenance loop.
+	n.wg.Go(func() {
+		n.connectLoop(ctx)
+	})
+
 	<-ctx.Done()
 	n.listener.Close()
-	wg.Wait()
+	// Close all peer connections so read loops unblock.
+	for _, p := range n.peers.All() {
+		p.Conn.Close()
+	}
+	n.wg.Wait()
 	return ctx.Err()
 }
 
@@ -103,11 +130,11 @@ func (n *Node) Connect(ctx context.Context, addr string) error {
 	if err != nil {
 		return fmt.Errorf("dialing %s: %w", addr, err)
 	}
-	n.addPeer(conn)
+	n.addPeer(conn, addr)
 	return nil
 }
 
-func (n *Node) addPeer(conn net.Conn) {
+func (n *Node) addPeer(conn net.Conn, listenAddr string) {
 	tlsConn := conn.(*tls.Conn)
 	peerKey, err := PeerPublicKeyFromTLS(tlsConn)
 	if err != nil {
@@ -115,11 +142,113 @@ func (n *Node) addPeer(conn net.Conn) {
 		conn.Close()
 		return
 	}
+	n.directory.Add(peerKey, listenAddr)
+	n.directory.ResetErrors(peerKey)
 	p := &Peer{
 		Key:         peerKey,
 		Conn:        conn,
 		ConnectedAt: time.Now(),
 	}
 	n.peers.Add(p)
-	n.logger.Info("peer connected", "key", publicKeyID(peerKey), "addr", conn.RemoteAddr())
+	n.logger.Info("connected to peer", "peer", publicKeyID(peerKey)[:8])
+
+	// Start read loop for this peer.
+	n.wg.Go(func() {
+		n.readLoop(p)
+	})
+}
+
+func (n *Node) readLoop(p *Peer) {
+	defer func() {
+		n.peers.Remove(p.Key)
+		p.Conn.Close()
+		n.logger.Info("disconnected from peer", "peer", publicKeyID(p.Key)[:8])
+	}()
+	for {
+		env, err := ReadEnvelope(p.Conn)
+		if err != nil {
+			return
+		}
+		switch body := env.Body.(type) {
+		case *Envelope_Message:
+			_ = body // TODO: handle incoming messages
+		case *Envelope_PeerGossip:
+			n.handleGossip(body.PeerGossip)
+		}
+	}
+}
+
+func (n *Node) handleGossip(gossip *PeerGossip) {
+	for _, pi := range gossip.GetPeers() {
+		if n.directory.Add(pi.Key, pi.GetAddress()) {
+			n.logger.Info("learned peer", "peer", publicKeyID(pi.Key)[:8])
+		}
+	}
+}
+
+func (n *Node) connectLoop(ctx context.Context) {
+	ticker := time.NewTicker(connectInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			n.maintainConnections(ctx)
+		}
+	}
+}
+
+func (n *Node) maintainConnections(ctx context.Context) {
+	current := n.peers.Len()
+	switch {
+	case current > targetConnections+targetConnectionsEpsilon:
+		// Drop a random connection.
+		if p := n.peers.Random(); p != nil {
+			n.logger.Info("dropping excess peer", "peer", publicKeyID(p.Key)[:8])
+			p.Conn.Close() // read loop will clean up
+		}
+	case current < targetConnections-targetConnectionsEpsilon:
+		// Connect to a random non-connected peer from the directory.
+		kp := n.directory.RandomNotIn(n.peers)
+		if kp == nil {
+			return
+		}
+		if err := n.Connect(ctx, kp.Address); err != nil {
+			n.directory.RecordError(kp.Key)
+			n.logger.Error("connect failed", "peer", publicKeyID(kp.Key)[:8], "err", err)
+		}
+	}
+}
+
+func (n *Node) gossipLoop(ctx context.Context) {
+	ticker := time.NewTicker(gossipInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			n.pushGossip()
+		}
+	}
+}
+
+func (n *Node) pushGossip() {
+	p := n.peers.Random()
+	if p == nil {
+		return
+	}
+	infos := n.directory.PeerInfos()
+	if len(infos) == 0 {
+		return
+	}
+	env := &Envelope{
+		Body: &Envelope_PeerGossip{
+			PeerGossip: &PeerGossip{Peers: infos},
+		},
+	}
+	if err := p.Send(env); err != nil {
+		n.logger.Error("gossip send failed", "peer", publicKeyID(p.Key)[:8], "err", err)
+	}
 }

@@ -2,6 +2,7 @@ package braid
 
 import (
 	"encoding/hex"
+	"math/rand/v2"
 	"net"
 	"sync"
 	"time"
@@ -12,6 +13,11 @@ type Peer struct {
 	Key         *PublicKey
 	Conn        net.Conn
 	ConnectedAt time.Time
+}
+
+// Send writes an envelope to the peer's connection.
+func (p *Peer) Send(env *Envelope) error {
+	return WriteEnvelope(p.Conn, env)
 }
 
 // PeerSet is a thread-safe set of active peers keyed by public key.
@@ -63,6 +69,23 @@ func (ps *PeerSet) Len() int {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 	return len(ps.peers)
+}
+
+// Random returns a random peer, or nil if the set is empty.
+func (ps *PeerSet) Random() *Peer {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	if len(ps.peers) == 0 {
+		return nil
+	}
+	i := rand.IntN(len(ps.peers))
+	for _, p := range ps.peers {
+		if i == 0 {
+			return p
+		}
+		i--
+	}
+	return nil
 }
 
 func publicKeyID(pk *PublicKey) string {

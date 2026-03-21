@@ -55,3 +55,24 @@ message Message {
   PublicKey author = 3;
   Signature signature = 4;
 }
+
+// PeerInfo identifies a peer by its public key and listen address.
+message PeerInfo {
+  PublicKey key = 1;
+  string address = 2;
+}
+
+// PeerGossip is a push-only list of known peers.
+message PeerGossip {
+  repeated PeerInfo peers = 1;
+}
+
+// Envelope is the wire format for peer-to-peer communication.
+// Each envelope is sent as a 4-byte big-endian length prefix followed
+// by the serialized Envelope bytes.
+message Envelope {
+  oneof body {
+    Message message = 1;
+    PeerGossip peer_gossip = 2;
+  }
+}
