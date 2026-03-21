@@ -57,6 +57,11 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 	}, nil
 }
 
+// ID returns the node's short hex identity string.
+func (n *Node) ID() string {
+	return n.selfID
+}
+
 // Addr returns the listener's address.
 func (n *Node) Addr() net.Addr {
 	return n.listener.Addr()
@@ -150,7 +155,7 @@ func (n *Node) addPeer(conn net.Conn, listenAddr string) {
 		ConnectedAt: time.Now(),
 	}
 	n.peers.Add(p)
-	n.logger.Info("connected to peer", "peer", publicKeyID(peerKey)[:8])
+	n.logger.Info("connected", "peer", publicKeyID(peerKey)[:8])
 
 	// Start read loop for this peer.
 	n.wg.Go(func() {
@@ -180,6 +185,9 @@ func (n *Node) readLoop(p *Peer) {
 
 func (n *Node) handleGossip(gossip *PeerGossip) {
 	for _, pi := range gossip.GetPeers() {
+		if publicKeyID(pi.Key) == publicKeyID(n.cfg.Identity.PublicKey()) {
+			continue
+		}
 		if n.directory.Add(pi.Key, pi.GetAddress()) {
 			n.logger.Info("learned peer", "peer", publicKeyID(pi.Key)[:8])
 		}

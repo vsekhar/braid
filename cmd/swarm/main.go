@@ -40,15 +40,15 @@ func main() {
 			fatal("creating node %d: %v", i, err)
 		}
 		nodes[i] = node
-		slog.Info("node created", "node", i, "addr", node.Addr())
+		slog.Info("created", "node", node.ID())
 	}
 
 	// Start all nodes.
 	var wg sync.WaitGroup
-	for i, node := range nodes {
+	for _, node := range nodes {
 		wg.Go(func() {
 			if err := node.Run(ctx); err != nil && ctx.Err() == nil {
-				slog.Error("node exited with error", "node", i, "err", err)
+				slog.Error("node exited with error", "node", node.ID(), "err", err)
 			}
 		})
 	}
@@ -57,9 +57,7 @@ func main() {
 	for i := 1; i < len(nodes); i++ {
 		prevAddr := nodes[i-1].Addr().String()
 		if err := nodes[i].Connect(ctx, prevAddr); err != nil {
-			slog.Error("connect failed", "from", i, "to", i-1, "err", err)
-		} else {
-			slog.Info("connected", "from", i, "to", i-1)
+			slog.Error("connect failed", "from", nodes[i].ID(), "to", nodes[i-1].ID(), "err", err)
 		}
 	}
 

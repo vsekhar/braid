@@ -49,7 +49,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	slog.Info("node starting", "addr", node.Addr())
+	slog.Info("starting", "node", node.ID(), "addr", node.Addr())
 	if err := node.Run(ctx); err != nil && ctx.Err() == nil {
 		fatal("node error: %v", err)
 	}
