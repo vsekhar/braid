@@ -14,6 +14,15 @@ import "google/protobuf/timestamp.proto";
 // algorithm used). Only one field should be set. Old schemes can be retired
 // using 'reserved' or the 'deprecated' annotation.
 message MessageRef {
+  // sha256_v1: SHA-256 over the following fields of Message, using
+  // explicit fixed-width big-endian encodings (not protobuf serialization):
+  //
+  //   - timestamp: int64 seconds || int32 nanos
+  //   - author: ed25519_v1 public key bytes (32 bytes)
+  //   - parent table: for each entry in order:
+  //       parent sha256_v1 (32 bytes) || uint64 message_count
+  //
+  // The signature field is excluded.
   bytes sha256_v1 = 1;
 }
 
