@@ -29,6 +29,7 @@ type Node struct {
 	listener  *Listener
 	peers     *PeerSet       // currently connected peers
 	directory *PeerDirectory // all known peers (connected or not)
+	store     *Store         // message DAG
 	selfID    string
 	wg        sync.WaitGroup
 	logger    *slog.Logger
@@ -52,6 +53,7 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 		listener:  ln,
 		peers:     NewPeerSet(),
 		directory: NewPeerDirectory(),
+		store:     NewStore(),
 		logger:    slog.Default().With("node", selfID),
 		selfID:    selfID,
 	}, nil
@@ -70,6 +72,11 @@ func (n *Node) Addr() net.Addr {
 // Peers returns a snapshot of connected peers.
 func (n *Node) Peers() []*Peer {
 	return n.peers.All()
+}
+
+// Store returns the node's message store.
+func (n *Node) Store() *Store {
+	return n.store
 }
 
 // Directory returns the node's peer directory.
@@ -176,11 +183,25 @@ func (n *Node) readLoop(p *Peer) {
 		}
 		switch body := env.Body.(type) {
 		case *Envelope_Message:
-			_ = body // TODO: handle incoming messages
+			n.handleMessage(body.Message)
 		case *Envelope_PeerGossip:
 			n.handleGossip(body.PeerGossip)
 		}
 	}
+}
+
+func (n *Node) handleMessage(msg *Message) {
+	ref, isNew, err := n.store.Add(msg)
+	if err != nil {
+		n.logger.Error("failed to add message", "err", err)
+		return
+	}
+	if !isNew {
+		return
+	}
+	n.logger.Info("received message", "ref", refKey(ref)[:8],
+		"incorporated", n.store.Len(), "pending", n.store.PendingLen(),
+		"wanted", len(n.store.Wanted()))
 }
 
 func (n *Node) handleGossip(gossip *PeerGossip) {
