@@ -351,8 +351,7 @@ func BenchmarkWideDAG_VerifyParentTable(b *testing.B) {
 	}
 	r.store.Add(msg)
 
-	b.ResetTimer()
-	for range b.N {
+	for b.Loop() {
 		ok, err := r.store.VerifyParentTable(msg)
 		if err != nil || !ok {
 			b.Fatal("verification failed")
@@ -370,8 +369,7 @@ func BenchmarkWideDAG_VerifyByConstruction(b *testing.B) {
 	}
 	r.store.Add(msg)
 
-	b.ResetTimer()
-	for range b.N {
+	for b.Loop() {
 		ok, err := r.store.VerifyParentTableByConstruction(msg)
 		if err != nil || !ok {
 			b.Fatal("verification failed")

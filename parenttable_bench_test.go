@@ -173,8 +173,7 @@ func benchSetup(b *testing.B) (*Store, *Message) {
 
 func BenchmarkVerifyParentTable(b *testing.B) {
 	s, msg := benchSetup(b)
-	b.ResetTimer()
-	for range b.N {
+	for b.Loop() {
 		ok, err := s.VerifyParentTable(msg)
 		if err != nil || !ok {
 			b.Fatal("verification failed")
@@ -184,8 +183,7 @@ func BenchmarkVerifyParentTable(b *testing.B) {
 
 func BenchmarkVerifyParentTableByConstruction(b *testing.B) {
 	s, msg := benchSetup(b)
-	b.ResetTimer()
-	for range b.N {
+	for b.Loop() {
 		ok, err := s.VerifyParentTableByConstruction(msg)
 		if err != nil || !ok {
 			b.Fatal("verification failed")
