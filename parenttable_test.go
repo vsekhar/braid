@@ -292,9 +292,9 @@ func TestBuildParentTable_Empty(t *testing.T) {
 	}
 }
 
-// TestVerifyParentTable tests that BuildParentTable produces tables that
+// TestVerifyParentTableByConstruction tests that BuildParentTable produces tables that
 // pass verification.
-func TestVerifyParentTable(t *testing.T) {
+func TestVerifyParentTableByConstruction(t *testing.T) {
 	s := NewStore()
 	id := testID(t)
 
@@ -328,9 +328,9 @@ func TestVerifyParentTable(t *testing.T) {
 	}
 }
 
-// TestVerifyParentTable_BadCount tests that verification rejects a parent
+// TestVerifyParentTableByConstruction_BadCount tests that verification rejects a parent
 // table with an incorrect count.
-func TestVerifyParentTable_BadCount(t *testing.T) {
+func TestVerifyParentTableByConstruction_BadCount(t *testing.T) {
 	s := NewStore()
 	id := testID(t)
 

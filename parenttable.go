@@ -54,32 +54,16 @@ func Total(msg *Message) uint64 {
 	return sum + 1
 }
 
-// BuildParentTable constructs a parent table from the given frontier messages.
-// It greedily selects parents by highest additional contribution using
-// interleaved backward BFS to compute overlaps.
-func (s *Store) BuildParentTable() *ParentTable {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if len(s.frontier) == 0 {
+// buildParentTableFromCandidates runs the greedy parent selection algorithm
+// on the given candidates. It selects parents by highest additional
+// contribution using interleaved backward BFS to compute overlaps.
+// Caller must hold s.mu for reading.
+func (s *Store) buildParentTableFromCandidates(candidates []candidate) *ParentTable {
+	if len(candidates) == 0 {
 		return &ParentTable{}
 	}
 
-	// Collect frontier messages as candidates.
-	candidates := make([]candidate, 0, len(s.frontier))
-	for k := range s.frontier {
-		msg := s.messages[k]
-		b, _ := hexDecode(k)
-		candidates = append(candidates, candidate{
-			key: k,
-			ref: &MessageRef{Sha256V1: b},
-			msg: msg,
-		})
-	}
-
-	// Accumulator: tracks the covered region across rounds.
 	accum := newWalkState()
-
 	var entries []*ParentTable_Entry
 
 	// Round 1: select first parent using Total() (O(1) per candidate).
@@ -105,7 +89,6 @@ func (s *Store) BuildParentTable() *ParentTable {
 			MessageCount: &mc,
 		})
 
-		// Seed accumulator with the first parent.
 		accum.seed(best.key)
 
 		candidates[bestIdx] = candidates[len(candidates)-1]
@@ -145,6 +128,25 @@ func (s *Store) BuildParentTable() *ParentTable {
 	}
 
 	return &ParentTable{Entries: entries}
+}
+
+// BuildParentTable constructs a parent table from the store's frontier messages.
+func (s *Store) BuildParentTable() *ParentTable {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	candidates := make([]candidate, 0, len(s.frontier))
+	for k := range s.frontier {
+		msg := s.messages[k]
+		b, _ := hexDecode(k)
+		candidates = append(candidates, candidate{
+			key: k,
+			ref: &MessageRef{Sha256V1: b},
+			msg: msg,
+		})
+	}
+
+	return s.buildParentTableFromCandidates(candidates)
 }
 
 // additional computes |reachable(key) \ accum.visited| using interleaved
@@ -194,6 +196,11 @@ func (s *Store) additional(key string, accum *walkState) (uint64, *walkState) {
 				continue
 			}
 
+			// Skip if already visited by B
+			if _, ok := incremental.visited[bk]; ok {
+				continue
+			}
+
 			// Add as incremental, enqueue parents
 			incremental.visited[bk] = struct{}{}
 			if msg, ok := s.messages[bk]; ok {
@@ -208,8 +215,6 @@ func (s *Store) additional(key string, accum *walkState) (uint64, *walkState) {
 	// Phase 2: Forward verification.
 	s.forwardVerify(incremental.visited, accum.visited)
 
-	// The remaining queue entries in incremental are parents of verified
-	// unique messages — they form the frontier for future merging.
 	return uint64(len(incremental.visited)), incremental
 }
 
@@ -268,6 +273,250 @@ func (s *Store) forwardVerify(incremental map[string]struct{}, visited map[strin
 	}
 }
 
+// VerifyParentTable checks a message's parent table using the simultaneous
+// multi-walk approach. All parents are walked concurrently with priority-based
+// attribution. P_1 is verified O(1) and branch walks share a single forward
+// verification pass.
+func (s *Store) VerifyParentTable(msg *Message) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	entries := msg.GetParents().GetEntries()
+	if len(entries) == 0 {
+		return true, nil
+	}
+
+	// Verify ordering and tiebreaking.
+	for i := range entries {
+		if i > 0 && entries[i].GetMessageCount() > entries[i-1].GetMessageCount() {
+			return false, nil
+		}
+		if i > 0 && entries[i].GetMessageCount() == entries[i-1].GetMessageCount() {
+			prevMsg, ok := s.messages[refKey(entries[i-1].GetParent())]
+			if !ok {
+				return false, nil
+			}
+			curMsg, ok := s.messages[refKey(entries[i].GetParent())]
+			if !ok {
+				return false, nil
+			}
+			if !validTiebreak(prevMsg, entries[i-1].GetParent(), curMsg, entries[i].GetParent()) {
+				return false, nil
+			}
+		}
+	}
+
+	// Verify P_1 count in O(1).
+	p1Key := refKey(entries[0].GetParent())
+	p1Msg, ok := s.messages[p1Key]
+	if !ok {
+		return false, nil
+	}
+	if Total(p1Msg) != entries[0].GetMessageCount() {
+		return false, nil
+	}
+
+	if len(entries) == 1 {
+		return true, nil
+	}
+
+	// Initialize per-parent walk states. Index 0 = P_1 (trunk, highest priority).
+	type parentWalk struct {
+		key     string
+		queue   []string
+		visited map[string]struct{}
+		counter uint64
+		claimed uint64
+	}
+	walks := make([]*parentWalk, len(entries))
+	for i, entry := range entries {
+		pk := refKey(entry.GetParent())
+		walks[i] = &parentWalk{
+			key:     pk,
+			queue:   []string{pk},
+			visited: make(map[string]struct{}),
+			claimed: entry.GetMessageCount(),
+		}
+	}
+
+	// Phase 1: Simultaneous backward walks with priority-based attribution.
+	for {
+		branchesActive := false
+		for i := 1; i < len(walks); i++ {
+			if len(walks[i].queue) > 0 {
+				branchesActive = true
+				break
+			}
+		}
+		if !branchesActive {
+			break
+		}
+
+		expandIdx := -1
+		expandSize := uint64(0)
+		for i, w := range walks {
+			if len(w.queue) == 0 {
+				continue
+			}
+			sz := uint64(len(w.visited))
+			if expandIdx == -1 || sz < expandSize {
+				expandIdx = i
+				expandSize = sz
+			}
+		}
+		if expandIdx == -1 {
+			break
+		}
+
+		w := walks[expandIdx]
+		mk := w.queue[0]
+		w.queue = w.queue[1:]
+
+		if _, ok := w.visited[mk]; ok {
+			continue
+		}
+
+		claimedByHigher := false
+		for j := 0; j < expandIdx; j++ {
+			if _, ok := walks[j].visited[mk]; ok {
+				claimedByHigher = true
+				break
+			}
+		}
+		if claimedByHigher {
+			continue
+		}
+
+		w.visited[mk] = struct{}{}
+		w.counter++
+
+		for k := expandIdx + 1; k < len(walks); k++ {
+			if _, ok := walks[k].visited[mk]; ok {
+				delete(walks[k].visited, mk)
+				walks[k].counter--
+			}
+		}
+
+		if msg, ok := s.messages[mk]; ok {
+			for _, entry := range msg.GetParents().GetEntries() {
+				pk := refKey(entry.GetParent())
+				w.queue = append(w.queue, pk)
+			}
+		}
+	}
+
+	// Phase 2: Forward verification on all branch parents simultaneously.
+	type fwdRoot struct {
+		parentIdx int
+		key       string
+	}
+	type fwdOrigin struct {
+		roots []fwdRoot
+	}
+
+	fwdVisited := make(map[string]*fwdOrigin)
+	var fwdQueue []string
+
+	for i := 1; i < len(walks); i++ {
+		for mk := range walks[i].visited {
+			root := fwdRoot{parentIdx: i, key: mk}
+			if existing, ok := fwdVisited[mk]; ok {
+				existing.roots = append(existing.roots, root)
+			} else {
+				fwdVisited[mk] = &fwdOrigin{roots: []fwdRoot{root}}
+				fwdQueue = append(fwdQueue, mk)
+			}
+		}
+	}
+
+	for len(fwdQueue) > 0 {
+		k := fwdQueue[0]
+		fwdQueue = fwdQueue[1:]
+		o := fwdVisited[k]
+
+		for _, root := range o.roots {
+			for j := 0; j < root.parentIdx; j++ {
+				if _, ok := walks[j].visited[k]; ok {
+					if _, ok := walks[root.parentIdx].visited[root.key]; ok {
+						delete(walks[root.parentIdx].visited, root.key)
+						walks[root.parentIdx].counter--
+					}
+					break
+				}
+			}
+		}
+
+		kids, ok := s.children[k]
+		if !ok {
+			continue
+		}
+		for childKey := range kids {
+			if existing, ok := fwdVisited[childKey]; ok {
+				existing.roots = append(existing.roots, o.roots...)
+			} else {
+				newO := &fwdOrigin{roots: make([]fwdRoot, len(o.roots))}
+				copy(newO.roots, o.roots)
+				fwdVisited[childKey] = newO
+				fwdQueue = append(fwdQueue, childKey)
+			}
+		}
+	}
+
+	// Verify counts.
+	for i := 1; i < len(walks); i++ {
+		if walks[i].counter != walks[i].claimed {
+			return false, nil
+		}
+	}
+
+	return true, nil
+}
+
+// VerifyParentTableByConstruction verifies a parent table by reconstructing
+// it from the same set of parents using the greedy construction algorithm,
+// then comparing the result entry-by-entry.
+func (s *Store) VerifyParentTableByConstruction(msg *Message) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	entries := msg.GetParents().GetEntries()
+	if len(entries) == 0 {
+		return true, nil
+	}
+
+	// Build candidate set from the parent table's parents.
+	candidates := make([]candidate, 0, len(entries))
+	for _, entry := range entries {
+		pk := refKey(entry.GetParent())
+		parentMsg, ok := s.messages[pk]
+		if !ok {
+			return false, nil
+		}
+		candidates = append(candidates, candidate{
+			key: pk,
+			ref: entry.GetParent(),
+			msg: parentMsg,
+		})
+	}
+
+	reconstructed := s.buildParentTableFromCandidates(candidates)
+
+	// Compare reconstructed vs original.
+	rEntries := reconstructed.GetEntries()
+	if len(rEntries) != len(entries) {
+		return false, nil
+	}
+	for i := range entries {
+		if refKey(entries[i].GetParent()) != refKey(rEntries[i].GetParent()) {
+			return false, nil
+		}
+		if entries[i].GetMessageCount() != rEntries[i].GetMessageCount() {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 // betterTiebreak returns true if candidate c should be preferred over the
 // current best when counts are equal. Tiebreak: later timestamp first,
 // then lexicographic on ref.
@@ -308,56 +557,6 @@ func unhex(c byte) byte {
 		return c - 'A' + 10
 	}
 	return 0
-}
-
-// VerifyParentTable checks that a message's parent table has correct counts
-// and ordering. The store must contain all referenced parent messages.
-func (s *Store) VerifyParentTable(msg *Message) (bool, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	entries := msg.GetParents().GetEntries()
-	if len(entries) == 0 {
-		return true, nil
-	}
-
-	accum := newWalkState()
-
-	for i, entry := range entries {
-		pk := refKey(entry.GetParent())
-
-		// Verify count.
-		count, incremental := s.additional(pk, accum)
-		if count != entry.GetMessageCount() {
-			return false, nil
-		}
-
-		// Verify ordering: count must be <= previous count.
-		if i > 0 && entry.GetMessageCount() > entries[i-1].GetMessageCount() {
-			return false, nil
-		}
-
-		// Verify tiebreaking if counts are equal.
-		if i > 0 && entry.GetMessageCount() == entries[i-1].GetMessageCount() {
-			prevMsg, ok := s.messages[refKey(entries[i-1].GetParent())]
-			if !ok {
-				return false, nil
-			}
-			curMsg, ok := s.messages[pk]
-			if !ok {
-				return false, nil
-			}
-			if !validTiebreak(prevMsg, entries[i-1].GetParent(), curMsg, entry.GetParent()) {
-				return false, nil
-			}
-		}
-
-		// Merge incremental and seed for next entry.
-		accum.merge(incremental)
-		accum.seed(pk)
-	}
-
-	return true, nil
 }
 
 // validTiebreak checks that prev should come before cur in tiebreak order.

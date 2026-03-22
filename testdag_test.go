@@ -7,25 +7,25 @@ import (
 
 // testDAG builds a large, interesting DAG for testing. The structure:
 //
-//	                    (genesis)
-//	                       |
-//	                  [trunk: 100 messages]
-//	                       |
-//	              early branch point
-//	             /                    \
-//	   [left: 50 msgs]         [right: 50 msgs]
-//	         |                        |
-//	         +--- diamond1 ---+       |
-//	         |                |       |
-//	   [left: 20 msgs]  [mid: 20]    |
-//	         |                |       |
-//	         +--- diamond2 ---+       |
-//	         |                        |
-//	   [left: 30 msgs]               |
-//	         |                  [right: 30 msgs]
-//	              late branch point
-//	             /                    \
-//	   [late-left: 10 msgs]   [late-right: 10 msgs]
+//	                 (genesis)
+//	                    |
+//	               [trunk: 100 messages]
+//	                    |
+//	           early branch point
+//	          /                    \
+//	[left: 50 msgs]         [right: 50 msgs]
+//	      |                        |
+//	      +--- diamond1 ---+       |
+//	      |                |       |
+//	[left: 20 msgs]  [mid: 20]    |
+//	      |                |       |
+//	      +--- diamond2 ---+       |
+//	      |                        |
+//	[left: 30 msgs]               |
+//	      |                  [right: 30 msgs]
+//	           late branch point
+//	          /                    \
+//	[late-left: 10 msgs]   [late-right: 10 msgs]
 //
 // Total messages: ~320
 // Properties exercised:
