@@ -297,7 +297,12 @@ func (s *Store) forwardVerify(incremental map[string]struct{}, visited map[strin
 func (s *Store) VerifyParentTable(msg *Message) (bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.verifyParentTable(msg)
+}
 
+// verifyParentTable is the lock-free implementation of VerifyParentTable.
+// Caller must hold s.mu for reading.
+func (s *Store) verifyParentTable(msg *Message) (bool, error) {
 	entries := msg.GetParents().GetEntries()
 	if len(entries) == 0 {
 		return true, nil

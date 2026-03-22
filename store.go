@@ -74,6 +74,9 @@ func (s *Store) Add(msg *Message) (*MessageRef, bool, error) {
 	}
 
 	if len(missingParents) == 0 {
+		if ok, _ := s.verifyParentTable(msg); !ok {
+			return ref, false, fmt.Errorf("invalid parent table")
+		}
 		s.incorporate(key, msg)
 		return ref, true, nil
 	}
@@ -132,6 +135,10 @@ func (s *Store) incorporate(key string, msg *Message) {
 					delete(s.missing, waiterKey)
 					waiterMsg := s.pending[waiterKey]
 					delete(s.pending, waiterKey)
+					if ok, _ := s.verifyParentTable(waiterMsg); !ok {
+						// Invalid parent table; drop the message silently.
+						continue
+					}
 					queue = append(queue, entry{waiterKey, waiterMsg})
 				}
 			}
