@@ -41,25 +41,25 @@ func Total(msg *Message) uint64 {
 	return sum + 1
 }
 
-// buildParentTableFromCandidates runs the greedy parent selection algorithm
-// on the given candidates. It selects parents by highest additional
-// contribution using interleaved backward BFS to compute overlaps.
+// buildTableFromParents runs the greedy algorithm on the given parents
+// and orders them by highest additional contribution using interleaved
+// backward BFS to compute overlaps.
 // Caller must hold s.mu for reading.
-func (s *Store) buildParentTableFromCandidates(candidates []*vertex) *ParentTable {
-	if len(candidates) == 0 {
+func (s *Store) buildTableFromParents(parents []*vertex) *ParentTable {
+	if len(parents) == 0 {
 		return &ParentTable{}
 	}
 
 	accum := newWalkState()
 	var entries []*ParentTable_Entry
 
-	// Round 1: select first parent using Total() (O(1) per candidate).
+	// Round 1: select first parent using Total() (O(1) per parent).
 	{
 		bestIdx := -1
 		var bestCount uint64
-		for i, c := range candidates {
+		for i, c := range parents {
 			count := Total(c.msg)
-			if count > bestCount || (count == bestCount && betterTiebreak(c, bestIdx, candidates)) {
+			if count > bestCount || (count == bestCount && betterTiebreak(c, bestIdx, parents)) {
 				bestCount = count
 				bestIdx = i
 			}
@@ -69,7 +69,7 @@ func (s *Store) buildParentTableFromCandidates(candidates []*vertex) *ParentTabl
 			return &ParentTable{}
 		}
 
-		best := candidates[bestIdx]
+		best := parents[bestIdx]
 		mc := bestCount
 		entries = append(entries, &ParentTable_Entry{
 			Parent:       best.ref,
@@ -78,19 +78,19 @@ func (s *Store) buildParentTableFromCandidates(candidates []*vertex) *ParentTabl
 
 		accum.seed(best)
 
-		candidates[bestIdx] = candidates[len(candidates)-1]
-		candidates = candidates[:len(candidates)-1]
+		parents[bestIdx] = parents[len(parents)-1]
+		parents = parents[:len(parents)-1]
 	}
 
 	// Round 2+: select subsequent parents using interleaved BFS.
-	for len(candidates) > 0 {
+	for len(parents) > 0 {
 		bestIdx := -1
 		var bestCount uint64
 		var bestIncremental *walkState
 
-		for i, c := range candidates {
+		for i, c := range parents {
 			count, incremental := s.additional(c, accum)
-			if count > bestCount || (count == bestCount && betterTiebreak(c, bestIdx, candidates)) {
+			if count > bestCount || (count == bestCount && betterTiebreak(c, bestIdx, parents)) {
 				bestCount = count
 				bestIdx = i
 				bestIncremental = incremental
@@ -101,7 +101,7 @@ func (s *Store) buildParentTableFromCandidates(candidates []*vertex) *ParentTabl
 			break
 		}
 
-		best := candidates[bestIdx]
+		best := parents[bestIdx]
 		mc := bestCount
 		entries = append(entries, &ParentTable_Entry{
 			Parent:       best.ref,
@@ -110,8 +110,8 @@ func (s *Store) buildParentTableFromCandidates(candidates []*vertex) *ParentTabl
 
 		accum.merge(bestIncremental)
 
-		candidates[bestIdx] = candidates[len(candidates)-1]
-		candidates = candidates[:len(candidates)-1]
+		parents[bestIdx] = parents[len(parents)-1]
+		parents = parents[:len(parents)-1]
 	}
 
 	return &ParentTable{Entries: entries}
@@ -122,12 +122,14 @@ func (s *Store) BuildParentTable() *ParentTable {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	candidates := make([]*vertex, 0, len(s.frontier))
+	// Naively select all messages on frontier as parents.
+	// TODO: smarter selection algo
+	parents := make([]*vertex, 0, len(s.frontier))
 	for n := range s.frontier {
-		candidates = append(candidates, n)
+		parents = append(parents, n)
 	}
 
-	return s.buildParentTableFromCandidates(candidates)
+	return s.buildTableFromParents(parents)
 }
 
 // additional computes |reachable(key) \ accum.visited| using interleaved
@@ -428,18 +430,17 @@ func (s *Store) VerifyParentTableByConstruction(msg *Message) (bool, error) {
 		return true, nil
 	}
 
-	// Build candidate set from the parent table's parents.
-	candidates := make([]*vertex, 0, len(entries))
+	parents := make([]*vertex, 0, len(entries))
 	for _, entry := range entries {
 		pk := refKey(entry.GetParent())
 		n, ok := s.vertices[pk]
 		if !ok {
 			return false, nil
 		}
-		candidates = append(candidates, n)
+		parents = append(parents, n)
 	}
 
-	reconstructed := s.buildParentTableFromCandidates(candidates)
+	reconstructed := s.buildTableFromParents(parents)
 
 	// Compare reconstructed vs original.
 	rEntries := reconstructed.GetEntries()
