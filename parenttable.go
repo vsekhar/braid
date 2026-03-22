@@ -2,7 +2,6 @@ package braid
 
 import (
 	"bytes"
-	"sort"
 )
 
 type candidate struct {
@@ -556,27 +555,3 @@ func validTiebreak(prevMsg *Message, prevRef *MessageRef, curMsg *Message, curRe
 	return bytes.Compare(prevRef.GetSha256V1(), curRef.GetSha256V1()) <= 0
 }
 
-// SortParentTable sorts a parent table by message_count descending, with
-// tiebreaking by timestamp (later first) then lexicographic on ref.
-func SortParentTable(entries []*ParentTable_Entry, store *Store) {
-	sort.SliceStable(entries, func(i, j int) bool {
-		ci := entries[i].GetMessageCount()
-		cj := entries[j].GetMessageCount()
-		if ci != cj {
-			return ci > cj
-		}
-		mi, _ := store.Get(entries[i].GetParent())
-		mj, _ := store.Get(entries[j].GetParent())
-		if mi != nil && mj != nil {
-			iTS := mi.GetTimestamp()
-			jTS := mj.GetTimestamp()
-			if iTS.GetSeconds() != jTS.GetSeconds() {
-				return iTS.GetSeconds() > jTS.GetSeconds()
-			}
-			if iTS.GetNanos() != jTS.GetNanos() {
-				return iTS.GetNanos() > jTS.GetNanos()
-			}
-		}
-		return bytes.Compare(entries[i].GetParent().GetSha256V1(), entries[j].GetParent().GetSha256V1()) < 0
-	})
-}
