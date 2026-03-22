@@ -175,12 +175,18 @@ func (s *Store) additional(key string, accum *walkState) (uint64, *walkState) {
 			ak := accum.queue[0]
 			accum.queue = accum.queue[1:]
 
-			// Add as visited, enqueue parents
+			if _, ok := accum.visited[ak]; ok {
+				continue
+			}
+
+			// Add as visited, enqueue unvisited parents
 			accum.visited[ak] = struct{}{}
 			if msg, ok := s.messages[ak]; ok {
 				for _, entry := range msg.GetParents().GetEntries() {
 					pk := refKey(entry.GetParent())
-					accum.queue = append(accum.queue, pk)
+					if _, ok := accum.visited[pk]; !ok {
+						accum.queue = append(accum.queue, pk)
+					}
 				}
 			}
 
@@ -201,12 +207,16 @@ func (s *Store) additional(key string, accum *walkState) (uint64, *walkState) {
 				continue
 			}
 
-			// Add as incremental, enqueue parents
+			// Add as incremental, enqueue parents not already seen
 			incremental.visited[bk] = struct{}{}
 			if msg, ok := s.messages[bk]; ok {
 				for _, entry := range msg.GetParents().GetEntries() {
 					pk := refKey(entry.GetParent())
-					incremental.queue = append(incremental.queue, pk)
+					if _, ok := incremental.visited[pk]; !ok {
+						if _, ok := accum.visited[pk]; !ok {
+							incremental.queue = append(incremental.queue, pk)
+						}
+					}
 				}
 			}
 		}
@@ -254,12 +264,19 @@ func (s *Store) forwardVerify(incremental map[string]struct{}, visited map[strin
 
 		kids, ok := s.children[k]
 		if !ok {
+			// Dead end: this message has no children in the store.
 			continue
 		}
 		for childKey := range kids {
 			if existing, ok := fwdVisited[childKey]; ok {
+				// Merge roots. Re-enqueue if we added new roots so they
+				// propagate forward through already-visited children.
+				oldLen := len(existing.roots)
 				for root := range o.roots {
 					existing.roots[root] = struct{}{}
+				}
+				if len(existing.roots) > oldLen {
+					fwdQueue = append(fwdQueue, childKey)
 				}
 			} else {
 				newO := &origin{roots: make(map[string]struct{}, len(o.roots))}
@@ -400,65 +417,26 @@ func (s *Store) VerifyParentTable(msg *Message) (bool, error) {
 		if msg, ok := s.messages[mk]; ok {
 			for _, entry := range msg.GetParents().GetEntries() {
 				pk := refKey(entry.GetParent())
-				w.queue = append(w.queue, pk)
-			}
-		}
-	}
-
-	// Phase 2: Forward verification on all branch parents simultaneously.
-	type fwdRoot struct {
-		parentIdx int
-		key       string
-	}
-	type fwdOrigin struct {
-		roots []fwdRoot
-	}
-
-	fwdVisited := make(map[string]*fwdOrigin)
-	var fwdQueue []string
-
-	for i := 1; i < len(walks); i++ {
-		for mk := range walks[i].visited {
-			root := fwdRoot{parentIdx: i, key: mk}
-			if existing, ok := fwdVisited[mk]; ok {
-				existing.roots = append(existing.roots, root)
-			} else {
-				fwdVisited[mk] = &fwdOrigin{roots: []fwdRoot{root}}
-				fwdQueue = append(fwdQueue, mk)
-			}
-		}
-	}
-
-	for len(fwdQueue) > 0 {
-		k := fwdQueue[0]
-		fwdQueue = fwdQueue[1:]
-		o := fwdVisited[k]
-
-		for _, root := range o.roots {
-			for j := 0; j < root.parentIdx; j++ {
-				if _, ok := walks[j].visited[k]; ok {
-					if _, ok := walks[root.parentIdx].visited[root.key]; ok {
-						delete(walks[root.parentIdx].visited, root.key)
-						walks[root.parentIdx].counter--
-					}
-					break
+				if _, ok := w.visited[pk]; !ok {
+					w.queue = append(w.queue, pk)
 				}
 			}
 		}
+	}
 
-		kids, ok := s.children[k]
-		if !ok {
-			continue
-		}
-		for childKey := range kids {
-			if existing, ok := fwdVisited[childKey]; ok {
-				existing.roots = append(existing.roots, o.roots...)
-			} else {
-				newO := &fwdOrigin{roots: make([]fwdRoot, len(o.roots))}
-				copy(newO.roots, o.roots)
-				fwdVisited[childKey] = newO
-				fwdQueue = append(fwdQueue, childKey)
-			}
+	// Phase 2: Forward verification on all branch parents.
+	// Build a cumulative "trusted" set from higher-priority walks.
+	// For each branch, forward-verify its visited set against the trusted set,
+	// then add its verified visited set to the trusted set for the next branch.
+	trusted := make(map[string]struct{})
+	for k := range walks[0].visited {
+		trusted[k] = struct{}{}
+	}
+	for i := 1; i < len(walks); i++ {
+		s.forwardVerify(walks[i].visited, trusted)
+		walks[i].counter = uint64(len(walks[i].visited))
+		for k := range walks[i].visited {
+			trusted[k] = struct{}{}
 		}
 	}
 
