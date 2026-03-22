@@ -4,42 +4,30 @@ import (
 	"bytes"
 )
 
-type candidate struct {
-	key string
-	ref *MessageRef
-	msg *Message
-}
-
-// walkState tracks the progress of a backward BFS walk through the DAG.
-// It holds the set of visited messages and the queue of messages whose
-// parents have not yet been explored.
+// walkState tracks a backward BFS walk using direct vertex pointers.
 type walkState struct {
-	visited map[string]struct{}
-	queue   []string
+	visited map[*vertex]struct{}
+	queue   []*vertex
 }
 
 func newWalkState() *walkState {
-	return &walkState{visited: make(map[string]struct{})}
+	return &walkState{visited: make(map[*vertex]struct{})}
 }
 
-// merge incorporates another walk state into this one. The other's visited
-// set is unioned in, and queue entries not already in this state's visited
-// set are appended to this state's queue.
 func (a *walkState) merge(b *walkState) {
-	for k := range b.visited {
-		a.visited[k] = struct{}{}
+	for n := range b.visited {
+		a.visited[n] = struct{}{}
 	}
-	for _, k := range b.queue {
-		if _, ok := a.visited[k]; !ok {
-			a.queue = append(a.queue, k)
+	for _, n := range b.queue {
+		if _, ok := a.visited[n]; !ok {
+			a.queue = append(a.queue, n)
 		}
 	}
 }
 
-// seed adds a root message to the walk state if not already visited.
-func (a *walkState) seed(key string) {
-	if _, ok := a.visited[key]; !ok {
-		a.queue = append(a.queue, key)
+func (a *walkState) seed(n *vertex) {
+	if _, ok := a.visited[n]; !ok {
+		a.queue = append(a.queue, n)
 	}
 }
 
@@ -57,7 +45,7 @@ func Total(msg *Message) uint64 {
 // on the given candidates. It selects parents by highest additional
 // contribution using interleaved backward BFS to compute overlaps.
 // Caller must hold s.mu for reading.
-func (s *Store) buildParentTableFromCandidates(candidates []candidate) *ParentTable {
+func (s *Store) buildParentTableFromCandidates(candidates []*vertex) *ParentTable {
 	if len(candidates) == 0 {
 		return &ParentTable{}
 	}
@@ -71,7 +59,7 @@ func (s *Store) buildParentTableFromCandidates(candidates []candidate) *ParentTa
 		var bestCount uint64
 		for i, c := range candidates {
 			count := Total(c.msg)
-			if count > bestCount || (count == bestCount && betterTiebreak(c.msg, c.ref, bestIdx, candidates)) {
+			if count > bestCount || (count == bestCount && betterTiebreak(c, bestIdx, candidates)) {
 				bestCount = count
 				bestIdx = i
 			}
@@ -88,7 +76,7 @@ func (s *Store) buildParentTableFromCandidates(candidates []candidate) *ParentTa
 			MessageCount: &mc,
 		})
 
-		accum.seed(best.key)
+		accum.seed(best)
 
 		candidates[bestIdx] = candidates[len(candidates)-1]
 		candidates = candidates[:len(candidates)-1]
@@ -101,8 +89,8 @@ func (s *Store) buildParentTableFromCandidates(candidates []candidate) *ParentTa
 		var bestIncremental *walkState
 
 		for i, c := range candidates {
-			count, incremental := s.additional(c.key, accum)
-			if count > bestCount || (count == bestCount && betterTiebreak(c.msg, c.ref, bestIdx, candidates)) {
+			count, incremental := s.additional(c, accum)
+			if count > bestCount || (count == bestCount && betterTiebreak(c, bestIdx, candidates)) {
 				bestCount = count
 				bestIdx = i
 				bestIncremental = incremental
@@ -134,15 +122,9 @@ func (s *Store) BuildParentTable() *ParentTable {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	candidates := make([]candidate, 0, len(s.frontier))
-	for k := range s.frontier {
-		msg := s.messages[k]
-		b, _ := hexDecode(k)
-		candidates = append(candidates, candidate{
-			key: k,
-			ref: &MessageRef{Sha256V1: b},
-			msg: msg,
-		})
+	candidates := make([]*vertex, 0, len(s.frontier))
+	for n := range s.frontier {
+		candidates = append(candidates, n)
 	}
 
 	return s.buildParentTableFromCandidates(candidates)
@@ -163,9 +145,9 @@ func (s *Store) BuildParentTable() *ParentTable {
 // positives.
 //
 // Caller must hold s.mu for reading.
-func (s *Store) additional(key string, accum *walkState) (uint64, *walkState) {
+func (s *Store) additional(target *vertex, accum *walkState) (uint64, *walkState) {
 	incremental := newWalkState()
-	incremental.queue = []string{key}
+	incremental.queue = []*vertex{target}
 
 	// Phase 1: Interleaved backward walk.
 	for len(incremental.queue) > 0 {
@@ -180,12 +162,9 @@ func (s *Store) additional(key string, accum *walkState) (uint64, *walkState) {
 
 			// Add as visited, enqueue unvisited parents
 			accum.visited[ak] = struct{}{}
-			if msg, ok := s.messages[ak]; ok {
-				for _, entry := range msg.GetParents().GetEntries() {
-					pk := refKey(entry.GetParent())
-					if _, ok := accum.visited[pk]; !ok {
-						accum.queue = append(accum.queue, pk)
-					}
+			for _, pk := range ak.parents {
+				if _, ok := accum.visited[pk]; !ok {
+					accum.queue = append(accum.queue, pk)
 				}
 			}
 
@@ -208,13 +187,10 @@ func (s *Store) additional(key string, accum *walkState) (uint64, *walkState) {
 
 			// Add as incremental, enqueue parents not already seen
 			incremental.visited[bk] = struct{}{}
-			if msg, ok := s.messages[bk]; ok {
-				for _, entry := range msg.GetParents().GetEntries() {
-					pk := refKey(entry.GetParent())
-					if _, ok := incremental.visited[pk]; !ok {
-						if _, ok := accum.visited[pk]; !ok {
-							incremental.queue = append(incremental.queue, pk)
-						}
+			for _, pk := range bk.parents {
+				if _, ok := incremental.visited[pk]; !ok {
+					if _, ok := accum.visited[pk]; !ok {
+						incremental.queue = append(incremental.queue, pk)
 					}
 				}
 			}
@@ -230,23 +206,23 @@ func (s *Store) additional(key string, accum *walkState) (uint64, *walkState) {
 // forwardVerify removes false positives from incremental by walking forward
 // through the children index. A message in incremental that can reach any
 // message in visited is a false positive.
-func (s *Store) forwardVerify(incremental map[string]struct{}, visited map[string]struct{}) {
+func (s *Store) forwardVerify(incremental map[*vertex]struct{}, visited map[*vertex]struct{}) {
 	if len(incremental) == 0 {
 		return
 	}
 
 	// Batch BFS forward from all incremental messages simultaneously.
 	type origin struct {
-		roots map[string]struct{}
+		roots map[*vertex]struct{}
 	}
 
-	fwdVisited := make(map[string]*origin)
-	var fwdQueue []string
+	fwdVisited := make(map[*vertex]*origin)
+	var fwdQueue []*vertex
 
-	for k := range incremental {
-		o := &origin{roots: map[string]struct{}{k: {}}}
-		fwdVisited[k] = o
-		fwdQueue = append(fwdQueue, k)
+	for n := range incremental {
+		o := &origin{roots: map[*vertex]struct{}{n: {}}}
+		fwdVisited[n] = o
+		fwdQueue = append(fwdQueue, n)
 	}
 
 	for len(fwdQueue) > 0 {
@@ -261,13 +237,8 @@ func (s *Store) forwardVerify(incremental map[string]struct{}, visited map[strin
 			continue
 		}
 
-		kids, ok := s.children[k]
-		if !ok {
-			// Dead end: this message has no children in the store.
-			continue
-		}
-		for childKey := range kids {
-			if existing, ok := fwdVisited[childKey]; ok {
+		for _, child := range k.children {
+			if existing, ok := fwdVisited[child]; ok {
 				// Merge roots. Re-enqueue if we added new roots so they
 				// propagate forward through already-visited children.
 				oldLen := len(existing.roots)
@@ -275,15 +246,15 @@ func (s *Store) forwardVerify(incremental map[string]struct{}, visited map[strin
 					existing.roots[root] = struct{}{}
 				}
 				if len(existing.roots) > oldLen {
-					fwdQueue = append(fwdQueue, childKey)
+					fwdQueue = append(fwdQueue, child)
 				}
 			} else {
-				newO := &origin{roots: make(map[string]struct{}, len(o.roots))}
+				newO := &origin{roots: make(map[*vertex]struct{}, len(o.roots))}
 				for root := range o.roots {
 					newO.roots[root] = struct{}{}
 				}
-				fwdVisited[childKey] = newO
-				fwdQueue = append(fwdQueue, childKey)
+				fwdVisited[child] = newO
+				fwdQueue = append(fwdQueue, child)
 			}
 		}
 	}
@@ -307,33 +278,28 @@ func (s *Store) verifyParentTable(msg *Message) (bool, error) {
 		return true, nil
 	}
 
-	// Verify ordering and tiebreaking.
-	for i := range entries {
+	// Resolve all parent refs to vertices and verify ordering/tiebreaking.
+	parents := make([]*vertex, len(entries))
+	for i, entry := range entries {
+		n, ok := s.vertices[refKey(entry.GetParent())]
+		if !ok {
+			return false, nil
+		}
+		parents[i] = n
+
 		if i > 0 && entries[i].GetMessageCount() > entries[i-1].GetMessageCount() {
 			return false, nil
 		}
 		if i > 0 && entries[i].GetMessageCount() == entries[i-1].GetMessageCount() {
-			prevMsg, ok := s.messages[refKey(entries[i-1].GetParent())]
-			if !ok {
-				return false, nil
-			}
-			curMsg, ok := s.messages[refKey(entries[i].GetParent())]
-			if !ok {
-				return false, nil
-			}
-			if !validTiebreak(prevMsg, entries[i-1].GetParent(), curMsg, entries[i].GetParent()) {
+			if !validTiebreak(parents[i-1].msg, parents[i-1].ref,
+				parents[i].msg, parents[i].ref) {
 				return false, nil
 			}
 		}
 	}
 
 	// Verify P_1 count in O(1).
-	p1Key := refKey(entries[0].GetParent())
-	p1Msg, ok := s.messages[p1Key]
-	if !ok {
-		return false, nil
-	}
-	if Total(p1Msg) != entries[0].GetMessageCount() {
+	if Total(parents[0].msg) != entries[0].GetMessageCount() {
 		return false, nil
 	}
 
@@ -343,19 +309,18 @@ func (s *Store) verifyParentTable(msg *Message) (bool, error) {
 
 	// Initialize per-parent walk states. Index 0 = P_1 (trunk, highest priority).
 	type parentWalk struct {
-		key     string
-		queue   []string
-		visited map[string]struct{}
+		n       *vertex
+		queue   []*vertex
+		visited map[*vertex]struct{}
 		counter uint64
 		claimed uint64
 	}
 	walks := make([]*parentWalk, len(entries))
 	for i, entry := range entries {
-		pk := refKey(entry.GetParent())
 		walks[i] = &parentWalk{
-			key:     pk,
-			queue:   []string{pk},
-			visited: make(map[string]struct{}),
+			n:       parents[i],
+			queue:   []*vertex{parents[i]},
+			visited: make(map[*vertex]struct{}),
 			claimed: entry.GetMessageCount(),
 		}
 	}
@@ -418,12 +383,9 @@ func (s *Store) verifyParentTable(msg *Message) (bool, error) {
 			}
 		}
 
-		if msg, ok := s.messages[mk]; ok {
-			for _, entry := range msg.GetParents().GetEntries() {
-				pk := refKey(entry.GetParent())
-				if _, ok := w.visited[pk]; !ok {
-					w.queue = append(w.queue, pk)
-				}
+		for _, pk := range mk.parents {
+			if _, ok := w.visited[pk]; !ok {
+				w.queue = append(w.queue, pk)
 			}
 		}
 	}
@@ -432,7 +394,7 @@ func (s *Store) verifyParentTable(msg *Message) (bool, error) {
 	// Build a cumulative "trusted" set from higher-priority walks.
 	// For each branch, forward-verify its visited set against the trusted set,
 	// then add its verified visited set to the trusted set for the next branch.
-	trusted := make(map[string]struct{})
+	trusted := make(map[*vertex]struct{})
 	for k := range walks[0].visited {
 		trusted[k] = struct{}{}
 	}
@@ -467,18 +429,14 @@ func (s *Store) VerifyParentTableByConstruction(msg *Message) (bool, error) {
 	}
 
 	// Build candidate set from the parent table's parents.
-	candidates := make([]candidate, 0, len(entries))
+	candidates := make([]*vertex, 0, len(entries))
 	for _, entry := range entries {
 		pk := refKey(entry.GetParent())
-		parentMsg, ok := s.messages[pk]
+		n, ok := s.vertices[pk]
 		if !ok {
 			return false, nil
 		}
-		candidates = append(candidates, candidate{
-			key: pk,
-			ref: entry.GetParent(),
-			msg: parentMsg,
-		})
+		candidates = append(candidates, n)
 	}
 
 	reconstructed := s.buildParentTableFromCandidates(candidates)
@@ -502,15 +460,13 @@ func (s *Store) VerifyParentTableByConstruction(msg *Message) (bool, error) {
 // betterTiebreak returns true if candidate c should be preferred over the
 // current best when counts are equal. Tiebreak: later timestamp first,
 // then lexicographic on ref.
-func betterTiebreak(msg *Message, ref *MessageRef, bestIdx int, candidates []candidate) bool {
+func betterTiebreak(c *vertex, bestIdx int, candidates []*vertex) bool {
 	if bestIdx == -1 {
 		return true
 	}
-	bestMsg := candidates[bestIdx].msg
-	bestRef := candidates[bestIdx].ref
-
-	cTS := msg.GetTimestamp()
-	bTS := bestMsg.GetTimestamp()
+	bestVtx := candidates[bestIdx]
+	cTS := c.msg.GetTimestamp()
+	bTS := bestVtx.msg.GetTimestamp()
 	if cTS.GetSeconds() != bTS.GetSeconds() {
 		return cTS.GetSeconds() > bTS.GetSeconds()
 	}
@@ -518,7 +474,7 @@ func betterTiebreak(msg *Message, ref *MessageRef, bestIdx int, candidates []can
 		return cTS.GetNanos() > bTS.GetNanos()
 	}
 
-	return bytes.Compare(ref.GetSha256V1(), bestRef.GetSha256V1()) < 0
+	return bytes.Compare(c.ref.GetSha256V1(), bestVtx.ref.GetSha256V1()) < 0
 }
 
 func hexDecode(s string) ([]byte, error) {
@@ -554,4 +510,3 @@ func validTiebreak(prevMsg *Message, prevRef *MessageRef, curMsg *Message, curRe
 	}
 	return bytes.Compare(prevRef.GetSha256V1(), curRef.GetSha256V1()) <= 0
 }
-

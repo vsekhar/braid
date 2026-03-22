@@ -409,7 +409,7 @@ func TestBuildParentTable_ForwardVerification(t *testing.T) {
 	}
 
 	// Second parent: additional = 2 (just the unique messages: the other
-	// frontier message itself + its unique intermediate node).
+	// frontier message itself + its unique intermediate vertex).
 	// If P1 selected first: additional(X|P1) = |{X, G}| = 2.
 	// If X selected first: additional(P1|X) = |{P1, D}| = 2.
 	if pt.Entries[1].GetMessageCount() != 2 {

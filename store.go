@@ -12,15 +12,24 @@ func refKey(ref *MessageRef) string {
 	return hex.EncodeToString(ref.GetSha256V1())
 }
 
+// vertex is an incorporated message with resolved parent and children pointers
+// for efficient in-memory traversal.
+type vertex struct {
+	msg      *Message
+	ref      *MessageRef
+	key      string
+	parents  []*vertex
+	children []*vertex
+}
+
 // Store holds the message DAG, including incorporated messages, pending
 // messages awaiting parents, and the frontier (messages with no children).
 type Store struct {
 	mu sync.RWMutex
 
 	// Incorporated messages.
-	messages map[string]*Message    // refKey → message
-	children map[string]map[string]struct{} // refKey → set of child refKeys
-	frontier map[string]struct{}    // refKeys of messages with no children
+	vertices map[string]*vertex   // refKey → vertex
+	frontier map[*vertex]struct{} // vertices with no children
 
 	// Pending messages awaiting missing parents.
 	pending   map[string]*Message            // refKey → message
@@ -32,9 +41,8 @@ type Store struct {
 // NewStore creates an empty Store.
 func NewStore() *Store {
 	return &Store{
-		messages:  make(map[string]*Message),
-		children:  make(map[string]map[string]struct{}),
-		frontier:  make(map[string]struct{}),
+		vertices:  make(map[string]*vertex),
+		frontier:  make(map[*vertex]struct{}),
 		pending:   make(map[string]*Message),
 		blockedBy: make(map[string]map[string]struct{}),
 		missing:   make(map[string]int),
@@ -57,7 +65,7 @@ func (s *Store) Add(msg *Message) (*MessageRef, bool, error) {
 	defer s.mu.Unlock()
 
 	// Skip duplicates.
-	if _, ok := s.messages[key]; ok {
+	if _, ok := s.vertices[key]; ok {
 		return ref, false, nil
 	}
 	if _, ok := s.pending[key]; ok {
@@ -68,7 +76,7 @@ func (s *Store) Add(msg *Message) (*MessageRef, bool, error) {
 	var missingParents []string
 	for _, entry := range msg.GetParents().GetEntries() {
 		pk := refKey(entry.GetParent())
-		if _, ok := s.messages[pk]; !ok {
+		if _, ok := s.vertices[pk]; !ok {
 			missingParents = append(missingParents, pk)
 		}
 	}
@@ -77,7 +85,7 @@ func (s *Store) Add(msg *Message) (*MessageRef, bool, error) {
 		if ok, _ := s.verifyParentTable(msg); !ok {
 			return ref, false, fmt.Errorf("invalid parent table")
 		}
-		s.incorporate(key, msg)
+		s.incorporate(key, ref, msg)
 		return ref, true, nil
 	}
 
@@ -96,33 +104,43 @@ func (s *Store) Add(msg *Message) (*MessageRef, bool, error) {
 
 // incorporate adds a message to the incorporated store and cascades to
 // unblock any pending messages. Caller must hold s.mu.
-func (s *Store) incorporate(key string, msg *Message) {
-	// Use a queue to avoid deep recursion.
+func (s *Store) incorporate(key string, ref *MessageRef, msg *Message) {
 	type entry struct {
 		key string
+		ref *MessageRef
 		msg *Message
 	}
-	queue := []entry{{key, msg}}
+	queue := []entry{{key, ref, msg}}
 
 	for len(queue) > 0 {
 		e := queue[0]
 		queue = queue[1:]
 
-		s.messages[e.key] = e.msg
-
-		// Update children index and frontier for each parent.
+		// Resolve parent pointers.
+		var parents []*vertex
 		for _, pe := range e.msg.GetParents().GetEntries() {
 			pk := refKey(pe.GetParent())
-			if s.children[pk] == nil {
-				s.children[pk] = make(map[string]struct{})
+			if pn, ok := s.vertices[pk]; ok {
+				parents = append(parents, pn)
 			}
-			s.children[pk][e.key] = struct{}{}
-			// Parent is no longer on the frontier.
-			delete(s.frontier, pk)
 		}
 
-		// This message is on the frontier (no children yet).
-		s.frontier[e.key] = struct{}{}
+		v := &vertex{
+			msg:     e.msg,
+			ref:     e.ref,
+			key:     e.key,
+			parents: parents,
+		}
+		s.vertices[e.key] = v
+
+		// Update children pointers and frontier.
+		for _, pn := range parents {
+			pn.children = append(pn.children, v)
+			delete(s.frontier, pn)
+		}
+
+		// This vertex is on the frontier (no children yet).
+		s.frontier[v] = struct{}{}
 
 		// Remove from wanted if it was there.
 		delete(s.wanted, e.key)
@@ -136,10 +154,10 @@ func (s *Store) incorporate(key string, msg *Message) {
 					waiterMsg := s.pending[waiterKey]
 					delete(s.pending, waiterKey)
 					if ok, _ := s.verifyParentTable(waiterMsg); !ok {
-						// Invalid parent table; drop the message silently.
 						continue
 					}
-					queue = append(queue, entry{waiterKey, waiterMsg})
+					waiterRef, _ := HashMessage(waiterMsg)
+					queue = append(queue, entry{waiterKey, waiterRef, waiterMsg})
 				}
 			}
 			delete(s.blockedBy, e.key)
@@ -167,22 +185,24 @@ func (s *Store) CreateMessage(id *Identity) (*Message, *MessageRef, error) {
 func (s *Store) Get(ref *MessageRef) (*Message, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	msg, ok := s.messages[refKey(ref)]
-	return msg, ok
+	n, ok := s.vertices[refKey(ref)]
+	if !ok {
+		return nil, false
+	}
+	return n.msg, ok
 }
 
 // Children returns the refs of all children of the given message.
 func (s *Store) Children(ref *MessageRef) []*MessageRef {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	kids, ok := s.children[refKey(ref)]
+	n, ok := s.vertices[refKey(ref)]
 	if !ok {
 		return nil
 	}
-	out := make([]*MessageRef, 0, len(kids))
-	for k := range kids {
-		b, _ := hex.DecodeString(k)
-		out = append(out, &MessageRef{Sha256V1: b})
+	out := make([]*MessageRef, len(n.children))
+	for i, child := range n.children {
+		out[i] = child.ref
 	}
 	return out
 }
@@ -192,9 +212,8 @@ func (s *Store) Frontier() []*MessageRef {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]*MessageRef, 0, len(s.frontier))
-	for k := range s.frontier {
-		b, _ := hex.DecodeString(k)
-		out = append(out, &MessageRef{Sha256V1: b})
+	for n := range s.frontier {
+		out = append(out, n.ref)
 	}
 	return out
 }
@@ -248,16 +267,18 @@ func (s *Store) Resolve(wanted []*MessageRef, frontier []*MessageRef) []*Message
 		k := queue[0]
 		queue = queue[1:]
 
-		msg, ok := s.messages[k]
-		if !ok {
-			msg, ok = s.pending[k]
+		// Check incorporated vertices first, then pending.
+		var msg *Message
+		if n, ok := s.vertices[k]; ok {
+			msg = n.msg
+		} else if pm, ok := s.pending[k]; ok {
+			msg = pm
 		}
-		if !ok {
-			continue // we don't have this message
+		if msg == nil {
+			continue
 		}
 		result = append(result, msg)
 
-		// Walk backward through parents.
 		for _, entry := range msg.GetParents().GetEntries() {
 			pk := refKey(entry.GetParent())
 			if _, ok := visited[pk]; ok {
@@ -278,7 +299,7 @@ func (s *Store) Resolve(wanted []*MessageRef, frontier []*MessageRef) []*Message
 func (s *Store) Len() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return len(s.messages)
+	return len(s.vertices)
 }
 
 // PendingLen returns the number of messages waiting for parents.
