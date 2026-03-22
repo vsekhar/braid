@@ -19,21 +19,21 @@ type wideDAGResult struct {
 // buildWideDAG builds a DAG with a tree-of-branches structure and
 // cross-linking diamond patterns. The shape:
 //
-//	                         (genesis)
-//	                            |
-//	                       [trunk: 100 msgs]
-//	                            |
-//	            +-------+-------+-------+-------+
-//	            |       |       |       |       |
-//	         [br0:30] [br1:25] [br2:20] [br3:15] [br4:10]
-//	          / \       / \
-//	    [sub0a] [sub0b] [sub1a] [sub1b]
-//	     :10     :10     :10     :8
-//	      \     /
-//	    [diamond merge]
-//	         :5
-//	        (tip0)
-//	                   (tip1a) (tip1b)  (tip2)  (tip3)  (tip4)
+//	                     (genesis)
+//	                        |
+//	                   [trunk: 100 msgs]
+//	                        |
+//	        +-------+-------+-------+-------+
+//	        |       |       |       |       |
+//	     [br0:30] [br1:25] [br2:20] [br3:15] [br4:10]
+//	      / \       / \
+//	[sub0a] [sub0b] [sub1a] [sub1b]
+//	 :10     :10     :10     :8
+//	  \     /
+//	[diamond merge]
+//	     :5
+//	    (tip0)
+//	               (tip1a) (tip1b)  (tip2)  (tip3)  (tip4)
 //
 // Frontier: tip0, tip1a, tip1b, tip2, tip3, tip4 = 6 tips
 // Properties: tree branching, sub-branches, diamond pattern, varying depths

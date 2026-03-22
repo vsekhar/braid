@@ -147,6 +147,22 @@ func (s *Store) incorporate(key string, msg *Message) {
 	}
 }
 
+// CreateMessage builds a parent table from the store's frontier, constructs
+// a new signed message, adds it to the store, and returns the message and
+// its ref.
+func (s *Store) CreateMessage(id *Identity) (*Message, *MessageRef, error) {
+	pt := s.BuildParentTable()
+	msg, err := NewMessage(id, pt)
+	if err != nil {
+		return nil, nil, err
+	}
+	ref, _, err := s.Add(msg)
+	if err != nil {
+		return nil, nil, err
+	}
+	return msg, ref, nil
+}
+
 // Get returns an incorporated message by ref.
 func (s *Store) Get(ref *MessageRef) (*Message, bool) {
 	s.mu.RLock()

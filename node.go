@@ -80,22 +80,6 @@ func (n *Node) Store() *Store {
 	return n.store
 }
 
-// CreateMessage builds a parent table from the store's frontier, constructs
-// a new signed message, adds it to the store, and returns it.
-func (n *Node) CreateMessage() (*Message, error) {
-	parents := n.store.BuildParentTable()
-	msg, err := NewMessage(n.cfg.Identity, parents)
-	if err != nil {
-		return nil, err
-	}
-	ref, _, err := n.store.Add(msg)
-	if err != nil {
-		return nil, err
-	}
-	n.logger.Info("created message", "ref", refKey(ref)[:8])
-	return msg, nil
-}
-
 // Directory returns the node's peer directory.
 func (n *Node) Directory() *PeerDirectory {
 	return n.directory

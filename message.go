@@ -79,8 +79,8 @@ func NewMessage(id *Identity, parents *ParentTable) (*Message, error) {
 	return msg, nil
 }
 
-// VerifyMessage checks that the message's signature is valid for its author.
-func VerifyMessage(msg *Message) (bool, error) {
+// VerifyMessageSignature checks that the message's signature is valid for its author.
+func VerifyMessageSignature(msg *Message) (bool, error) {
 	if msg.GetAuthor() == nil || msg.GetSignature() == nil {
 		return false, fmt.Errorf("message missing author or signature")
 	}
