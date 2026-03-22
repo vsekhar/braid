@@ -145,12 +145,106 @@ proof of work:
 
 ### Verification
 
-When verifying a received message's parent table, the same algorithm is used:
-- An accumulator walk state is built up across entries.
-- For each entry, `additional()` computes the expected count.
-- The claimed count must match exactly.
-- Ordering must be descending by count, with ties broken by timestamp (later
-  first) then lexicographically on ref.
+Verification exploits the fact that all parents, their ordering, and their
+claimed counts are known in advance. This allows a simultaneous multi-walk
+approach that is substantially cheaper than construction.
 
-Verification is computationally equivalent to construction. The accumulator
-grows across entries just as it does across rounds during construction.
+#### Construction vs. Verification
+
+During **construction**, the algorithm must:
+- Evaluate every remaining candidate at each round to find the best.
+- Discard non-winning candidates' incremental walk states each round.
+- Process parents one at a time because the full set is not known in advance.
+- Total: O(k × |frontier|) evaluations, each requiring an interleaved BFS.
+
+During **verification**, the algorithm:
+- Knows all k parents and their claimed counts upfront.
+- Evaluates exactly 1 parent per round (or all simultaneously).
+- Can reuse walk state across all parents in a single pass.
+- Total: O(k) evaluations, or O(1) pass with simultaneous walks.
+
+#### Trunk/Branch Model
+
+In a typical braid, the parent table is heavily skewed: the first parent P_1
+(the "trunk") has a count of ~total(P_1) ≈ billions, while subsequent parents
+(the "branches") have counts in the 10s or 100s.
+
+P_1's count is verified in O(1): check C_1 == total(P_1). No walk needed.
+P_1's walk serves only to help branch walks terminate (by filling a visited
+set that branch walks prune against).
+
+#### Simultaneous Multi-Walk Verification
+
+Each parent P_i is given its own walk state, seeded with P_i. All walks
+proceed simultaneously with pace control. Parent indices define priority:
+P_1 is highest priority, P_k is lowest.
+
+**Backward walk step** (dequeue message M from P_i's queue):
+
+1. Check if any higher-priority parent P_j (j < i) has already visited M.
+   If so, skip — M is rightfully attributed to P_j.
+
+2. Otherwise, add M to P_i.visited. Increment counter[i]. Enqueue M's
+   parents into P_i's queue.
+
+3. Check if any lower-priority parent P_k (k > i) has visited M. If so,
+   remove M from P_k.visited and decrement counter[k] — P_i has reclaimed
+   the message.
+
+**Pace control**: expand the parent whose visited set is smallest, breaking
+ties by priority (lower index first). This keeps all walks balanced and
+prevents any single walk from materializing the full DAG.
+
+**Termination**: branch walks (P_2, ..., P_k) terminate when their queues
+are empty — all branches have been pruned by higher-priority visited sets
+or exhausted. P_1's walk does NOT need to exhaust. Once all branch queues
+are empty, P_1's remaining count is known: C_1 = total(P_1), verified O(1).
+
+#### Forward Verification (all branch parents)
+
+After all branch queues are empty, branch visited sets may contain **false
+positives**: trunk messages that P_1's walk hadn't reached when a branch
+walk claimed them. Queue exhaustion does NOT prevent this — a branch walk
+can exhaust at genesis having walked through trunk territory that P_1
+never visited.
+
+Forward verification is performed for **all** branch parents simultaneously:
+
+1. Batch BFS forward from all messages in P_2.visited ∪ ... ∪ P_k.visited
+   through the children index. Each message is tagged with the parent index
+   it belongs to.
+
+2. If a forward walk from a message in P_i.visited reaches any P_j.visited
+   where j < i, the message is a false positive — it is an ancestor of a
+   higher-priority parent's visited message. Remove it from P_i.visited and
+   decrement counter[i].
+
+3. This is correct even if P_j.visited itself contains false positives: the
+   message reaching P_j.visited proves it is in reachable(P_j), so it should
+   not be attributed to P_i (which has lower priority).
+
+After forward verification, verify counter[i] == C_i for each branch parent.
+
+#### Cost Analysis (Verification)
+
+- P_1 (trunk): O(1) count verification. Backward walk cost is proportional
+  to the branch walks (pace control keeps them balanced), not to the trunk
+  size.
+
+- P_2, ..., P_k (branches): backward walk cost proportional to each branch's
+  divergent region (typically 10s-100s of messages). Forward verification
+  cost also proportional to branch sizes (forward walks hit the trunk or
+  higher-priority visited sets quickly).
+
+- **Simultaneity advantage**: all branch walks share a single forward
+  verification pass. All backward walks proceed in parallel, sharing the
+  benefit of P_1's growing visited set.
+
+- **Reuse advantage**: unlike construction (which discards non-winning
+  incrementals each round), verification retains all walk states and
+  processes all parents in a single pass.
+
+- **Total work**: O(sum of branch sizes) + O(P_1 walk to support pruning),
+  where P_1's walk is bounded by the pace control to roughly match the
+  branch sizes. This is dramatically cheaper than construction for skewed
+  parent tables.
