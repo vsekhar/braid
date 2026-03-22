@@ -3,5 +3,9 @@
     "allow": [
       "WebFetch(domain:protobuf.dev)"
     ]
+  },
+  "attribution": {
+    "pr": "",
+    "commit": ""
   }
 }
