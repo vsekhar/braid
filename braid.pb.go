@@ -443,7 +443,7 @@ func (x *MessageRequest) GetFrontier() []*MessageRef {
 }
 
 // Envelope is the wire format for peer-to-peer communication.
-// Each envelope is sent as a 4-byte big-endian length prefix followed
+// Each envelope is sent as a varint-encoded length prefix followed
 // by the serialized Envelope bytes.
 type Envelope struct {
 	state protoimpl.MessageState `protogen:"open.v1"`

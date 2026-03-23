@@ -2,7 +2,7 @@
 priority: p2
 type: task
 created: 2026-03-22T20:24:29-04:00
-updated: 2026-03-22T20:24:29-04:00
+updated: 2026-03-22T20:25:46-04:00
 ---
 
 # Use varint length prefix in wire protocol
@@ -79,3 +79,9 @@ to:
 - [ ] `ReadEnvelope` uses `binary.ReadUvarint` for the length prefix
 - [ ] `braid.proto` Envelope comment updated to say "varint-encoded length prefix"
 - [ ] Existing tests pass (round-trip encoding/decoding still works)
+
+---
+
+_📝 Noted on 2026-03-22 20:25:46-04:00 @ git:971aa73+local_
+
+Replaced uint32 big-endian length prefix with varint in WriteEnvelope/ReadEnvelope. Added minimal byteReader wrapper for ReadUvarint. Updated braid.proto Envelope comment.
