@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/vsekhar/braid"
+	_ "github.com/vsekhar/braid/log"
 )
 
 func main() {
