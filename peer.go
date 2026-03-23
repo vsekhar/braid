@@ -88,6 +88,18 @@ func (ps *PeerSet) Random() *Peer {
 	return nil
 }
 
+// RandomN returns up to n random peers from the set.
+func (ps *PeerSet) RandomN(n int) []*Peer {
+	all := ps.All()
+	if len(all) <= n {
+		return all
+	}
+	rand.Shuffle(len(all), func(i, j int) {
+		all[i], all[j] = all[j], all[i]
+	})
+	return all[:n]
+}
+
 func publicKeyID(pk *PublicKey) string {
 	return hex.EncodeToString(pk.GetEd25519V1())
 }

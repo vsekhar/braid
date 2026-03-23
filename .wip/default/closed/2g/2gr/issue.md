@@ -2,7 +2,7 @@
 priority: p2
 type: feature
 created: 2026-03-22T19:50:53-04:00
-updated: 2026-03-22T19:50:53-04:00
+updated: 2026-03-22T19:54:37-04:00
 ---
 
 # Add periodic message creation and push gossip to peers
@@ -67,3 +67,9 @@ n.wg.Go(func() {
 - [ ] Messages are incorporated locally even when no peers are connected
 - [ ] Existing tests continue to pass
 - [ ] The swarm simulator (`cmd/swarm/main.go`) shows messages being created and exchanged between nodes
+
+---
+
+_📝 Noted on 2026-03-22 19:54:37-04:00 @ git:71c7717+local_
+
+Implementation complete. Added PeerSet.RandomN(n) in peer.go and messageLoop/pushMessage in node.go. No dead code introduced. All tests pass.

@@ -10,6 +10,7 @@ import (
 	"time"
 )
 
+const messageInterval = 500 * time.Millisecond
 const gossipInterval = 7 * time.Second
 const connectInterval = 3 * time.Second
 const wantedInterval = 5 * time.Second
@@ -125,6 +126,11 @@ func (n *Node) Run(ctx context.Context) error {
 	// Wanted request loop.
 	n.wg.Go(func() {
 		n.wantedLoop(ctx)
+	})
+
+	// Message creation loop.
+	n.wg.Go(func() {
+		n.messageLoop(ctx)
 	})
 
 	<-ctx.Done()
@@ -343,4 +349,36 @@ func (n *Node) pushGossip() {
 	if err := p.Send(env); err != nil {
 		n.logger.Error("gossip send failed", "peer", publicKeyID(p.Key)[:8], "err", err)
 	}
+}
+
+func (n *Node) messageLoop(ctx context.Context) {
+	ticker := time.NewTicker(messageInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			n.pushMessage()
+		}
+	}
+}
+
+func (n *Node) pushMessage() {
+	msg, ref, err := n.store.CreateMessage(n.cfg.Identity)
+	if err != nil {
+		n.logger.Error("failed to create message", "err", err)
+		return
+	}
+	env := &Envelope{
+		Body: &Envelope_Message{Message: msg},
+	}
+	peers := n.peers.RandomN(5)
+	for _, p := range peers {
+		if err := p.Send(env); err != nil {
+			n.logger.Error("message send failed", "peer", publicKeyID(p.Key)[:8], "err", err)
+		}
+	}
+	n.logger.Info("created message", "ref", refKey(ref)[:8],
+		"peers", len(peers), "incorporated", n.store.Len())
 }
