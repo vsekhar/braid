@@ -172,6 +172,7 @@ func (n *Node) addPeer(conn net.Conn, listenAddr string) {
 		Key:         peerKey,
 		Conn:        conn,
 		ConnectedAt: time.Now(),
+		logger:      n.logger,
 	}
 	n.peers.Add(p)
 	n.logger.Info("connected", "peer", publicKeyID(peerKey)[:8])
@@ -240,7 +241,6 @@ func (n *Node) handleMessageRequest(p *Peer, req *MessageRequest) {
 			Body: &Envelope_Message{Message: msg},
 		}
 		if err := p.Send(env); err != nil {
-			n.logger.Error("resolve send failed", "peer", publicKeyID(p.Key)[:8], "err", err)
 			return
 		}
 	}
@@ -279,9 +279,7 @@ func (n *Node) sendMessageRequest() {
 	}
 	n.logger.Info("sending wanted request", "peer", publicKeyID(p.Key)[:8],
 		"wanted", len(wanted), "frontier", len(frontier))
-	if err := p.Send(env); err != nil {
-		n.logger.Error("wanted request send failed", "peer", publicKeyID(p.Key)[:8], "err", err)
-	}
+	p.Send(env)
 }
 
 func (n *Node) connectLoop(ctx context.Context) {
@@ -346,9 +344,7 @@ func (n *Node) pushGossip() {
 			PeerGossip: &PeerGossip{Peers: infos},
 		},
 	}
-	if err := p.Send(env); err != nil {
-		n.logger.Error("gossip send failed", "peer", publicKeyID(p.Key)[:8], "err", err)
-	}
+	p.Send(env)
 }
 
 func (n *Node) messageLoop(ctx context.Context) {
@@ -375,9 +371,7 @@ func (n *Node) pushMessage() {
 	}
 	peers := n.peers.RandomN(5)
 	for _, p := range peers {
-		if err := p.Send(env); err != nil {
-			n.logger.Error("message send failed", "peer", publicKeyID(p.Key)[:8], "err", err)
-		}
+		p.Send(env)
 	}
 	n.logger.Info("created message", "ref", refKey(ref)[:8],
 		"peers", len(peers), "incorporated", n.store.Len())

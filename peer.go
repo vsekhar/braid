@@ -2,6 +2,8 @@ package braid
 
 import (
 	"encoding/hex"
+	"errors"
+	"log/slog"
 	"math/rand/v2"
 	"net"
 	"sync"
@@ -13,11 +15,22 @@ type Peer struct {
 	Key         *PublicKey
 	Conn        net.Conn
 	ConnectedAt time.Time
+	logger      *slog.Logger
 }
 
-// Send writes an envelope to the peer's connection.
+// Send writes an envelope to the peer's connection. On error it closes the
+// connection (triggering readLoop cleanup) and returns the error.
 func (p *Peer) Send(env *Envelope) error {
-	return WriteEnvelope(p.Conn, env)
+	if err := WriteEnvelope(p.Conn, env); err != nil {
+		if errors.Is(err, net.ErrClosed) {
+			p.logger.Info("connection closed from remote", "peer", publicKeyID(p.Key)[:8])
+		} else {
+			p.logger.Error("send failed", "peer", publicKeyID(p.Key)[:8], "err", err)
+		}
+		p.Conn.Close()
+		return err
+	}
+	return nil
 }
 
 // PeerSet is a thread-safe set of active peers keyed by public key.
