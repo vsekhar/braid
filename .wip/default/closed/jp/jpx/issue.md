@@ -2,7 +2,7 @@
 priority: p2
 type: task
 created: 2026-03-23T14:18:37-04:00
-updated: 2026-03-23T14:18:37-04:00
+updated: 2026-03-23T14:20:27-04:00
 ---
 
 # Convert swarm_viz.py to Jupyter notebook
@@ -43,3 +43,9 @@ The notebook should be runnable with `uv run jupyter lab` or similar. Remove `sw
 - [ ] Notebook cells are logically organized for interactive use
 - [ ] `analysis/swarm_viz.py` is removed
 - [ ] Notebook runs cleanly with `uv`-managed dependencies
+
+---
+
+_📝 Noted on 2026-03-23 14:20:27-04:00 @ git:bf511e3+local_
+
+Converted swarm_viz.py to swarm_viz.ipynb with 5 cells: markdown header, imports, config/regex, parse+run, plot. Removed swarm_viz.py. Dead code check shows only pre-existing items. Go tests pass.
