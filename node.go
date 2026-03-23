@@ -8,6 +8,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 const messageInterval = 500 * time.Millisecond
@@ -172,7 +174,6 @@ func (n *Node) addPeer(conn net.Conn, listenAddr string) {
 		Key:         peerKey,
 		Conn:        conn,
 		ConnectedAt: time.Now(),
-		logger:      n.logger,
 	}
 	n.peers.Add(p)
 	n.logger.Info("connected", "peer", publicKeyID(peerKey)[:8])
@@ -201,6 +202,11 @@ func (n *Node) readLoop(p *Peer) {
 			n.handleGossip(body.PeerGossip)
 		case *Envelope_MessageRequest:
 			n.handleMessageRequest(p, body.MessageRequest)
+		default:
+			unknown := env.ProtoReflect().GetUnknown()
+			num, typ, length := protowire.ConsumeField(unknown)
+			n.logger.Info("dropping envelope with unknown contents", "peer", publicKeyID(p.Key)[:8],
+				"field", num, "wire_type", typ, "length", length)
 		}
 	}
 }

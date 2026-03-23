@@ -1,0 +1,23 @@
+// Extended Envelope definition for testing unknown field detection.
+
+edition = "2023";
+
+option go_package = "github.com/vsekhar/braid/internal/testproto";
+
+package testproto;
+
+// FutureMessage is a message type that does not exist in the current proto.
+message FutureMessage {
+  string payload = 1;
+}
+
+// ExtendedEnvelope mirrors braid.Envelope but adds an additional oneof variant
+// with a high field number to avoid collisions with future Envelope fields.
+message ExtendedEnvelope {
+  oneof body {
+    bytes message = 1;
+    bytes peer_gossip = 2;
+    bytes message_request = 3;
+    FutureMessage future = 100;
+  }
+}
