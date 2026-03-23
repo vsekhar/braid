@@ -2,7 +2,7 @@
 priority: p2
 type: feature
 created: 2026-03-22T22:10:36-04:00
-updated: 2026-03-22T22:10:36-04:00
+updated: 2026-03-22T22:18:10-04:00
 ---
 
 # Add -peer flag to swarm command
@@ -59,3 +59,9 @@ Note: Connection failures to external peers should be logged but not fatal — t
 - [ ] `swarm -peer host1:8443 -peer host2:8443` connects to multiple external peers (possibly from different swarm nodes)
 - [ ] `swarm` (no `-peer` flag) behaves identically to current behavior
 - [ ] Failed external peer connections are logged but do not stop the swarm
+
+---
+
+_📝 Noted on 2026-03-22 22:18:10-04:00 @ git:b9244a7+local_
+
+Implemented -peer flag. Added multiFlag type, registered the flag, and added loop after internal topology to connect random swarm nodes to each external peer. Failures are logged but non-fatal. Build, vet, and tests pass.

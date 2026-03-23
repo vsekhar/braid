@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"os"
 	"os/signal"
 	"sync"
@@ -17,6 +18,8 @@ import (
 func main() {
 	n := flag.Int("n", 10, "number of nodes")
 	listenAddr := flag.String("listen", ":0", "listen address for the first node")
+	var peers multiFlag
+	flag.Var(&peers, "peer", "external peer address to connect to (repeatable)")
 	flag.Parse()
 
 	if *n < 1 {
@@ -67,6 +70,14 @@ func main() {
 		}
 	}
 
+	// Connect to external peers, each via a randomly selected swarm node.
+	for _, peerAddr := range peers {
+		node := nodes[rand.IntN(len(nodes))]
+		if err := node.Connect(ctx, peerAddr); err != nil {
+			slog.Error("peer connect failed", "from", node.ID(), "to", peerAddr, "err", err)
+		}
+	}
+
 	slog.Info("swarm running", "nodes", *n)
 	<-ctx.Done()
 	wg.Wait()
@@ -75,4 +86,13 @@ func main() {
 func fatal(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
 	os.Exit(1)
+}
+
+// multiFlag allows a flag to be specified multiple times.
+type multiFlag []string
+
+func (f *multiFlag) String() string { return fmt.Sprint(*f) }
+func (f *multiFlag) Set(value string) error {
+	*f = append(*f, value)
+	return nil
 }

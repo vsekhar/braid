@@ -17,8 +17,8 @@ func main() {
 	listenAddr := flag.String("listen", ":8443", "listen address")
 	keyPath := flag.String("key", "braid.pem", "path to ed25519 private key")
 	generateKey := flag.Bool("generate-key", false, "generate a new key and exit")
-	var bootstrapPeers multiFlag
-	flag.Var(&bootstrapPeers, "peer", "bootstrap peer address (repeatable)")
+	var peers multiFlag
+	flag.Var(&peers, "peer", "bootstrap peer address (repeatable)")
 	flag.Parse()
 
 	if *generateKey {
@@ -41,7 +41,7 @@ func main() {
 	node, err := braid.NewNode(braid.NodeConfig{
 		ListenAddr:     *listenAddr,
 		Identity:       id,
-		BootstrapPeers: bootstrapPeers,
+		BootstrapPeers: peers,
 	})
 	if err != nil {
 		fatal("creating node: %v", err)
