@@ -2,7 +2,7 @@
 priority: p2
 type: feature
 created: 2026-03-22T22:06:43-04:00
-updated: 2026-03-22T22:12:11-04:00
+updated: 2026-03-22T22:14:39-04:00
 ---
 
 # Add -listen flag to swarm command
@@ -55,5 +55,11 @@ Currently, the swarm command (`cmd/swarm/main.go`) starts all nodes on `localhos
 ---
 
 _📝 Noted on 2026-03-22 22:12:11-04:00 @ git:3326e77+local_
+
+Implemented -listen flag. Used *listenAddr for node 0 and "localhost:0" for all others. Also added addr to the created log line for all nodes so the user can see where to connect. Build, vet, and tests pass. No new dead code.
+
+---
+
+_📝 Noted on 2026-03-22 22:14:39-04:00 @ git:3d45b8a+local_
 
 Implemented -listen flag. Used *listenAddr for node 0 and "localhost:0" for all others. Also added addr to the created log line for all nodes so the user can see where to connect. Build, vet, and tests pass. No new dead code.

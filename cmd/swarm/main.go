@@ -16,6 +16,7 @@ import (
 
 func main() {
 	n := flag.Int("n", 10, "number of nodes")
+	listenAddr := flag.String("listen", ":0", "listen address for the first node")
 	flag.Parse()
 
 	if *n < 1 {
@@ -33,15 +34,19 @@ func main() {
 		if err != nil {
 			fatal("generating identity for node %d: %v", i, err)
 		}
+		addr := ":0"
+		if i == 0 {
+			addr = *listenAddr
+		}
 		node, err := braid.NewNode(braid.NodeConfig{
-			ListenAddr: "localhost:0",
+			ListenAddr: addr,
 			Identity:   id,
 		})
 		if err != nil {
 			fatal("creating node %d: %v", i, err)
 		}
 		nodes[i] = node
-		slog.Info("created", "node", node.ID())
+		slog.Info("created", "node", node.ID(), "addr", node.Addr())
 	}
 
 	// Start all nodes.
