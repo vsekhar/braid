@@ -36,7 +36,7 @@ def _():
 @app.cell
 def _(Path, mo, re):
     _notebook_dir = Path(mo.notebook_dir())
-    LOG_FILE = str(_notebook_dir / "../swarm2.log")
+    LOG_FILE = str(_notebook_dir / "../swarm5.log")
     OUT_DIR = _notebook_dir
 
     RECEIVED_RE = re.compile(
@@ -59,22 +59,42 @@ def _(Path, mo, re):
         r'time=(\S+)\s+level=\S+\s+msg="sending wanted request"\s+'
         r'node=([0-9a-f]+)\s+peer=([0-9a-f]+)\s+wanted=(\d+)\s+frontier=(\d+)'
     )
+
+    CONNECT_RE = re.compile(
+        r'time=(\S+)\s+level=\S+\s+msg=connected\s+'
+        r'node=([0-9a-f]+)\s+peer=([0-9a-f]+)'
+    )
+
+    DISCONNECT_RE = re.compile(
+        r'time=(\S+)\s+level=\S+\s+msg="disconnected from peer"\s+'
+        r'node=([0-9a-f]+)\s+peer=([0-9a-f]+)'
+    )
+
+    SHUTDOWN_RE = re.compile(
+        r'time=(\S+)\s+level=\S+\s+msg="shutting down"'
+    )
     return (
+        CONNECT_RE,
         CREATED_RE,
+        DISCONNECT_RE,
         LOG_FILE,
         OUT_DIR,
         RECEIVED_RE,
         RESOLVE_RE,
+        SHUTDOWN_RE,
         WANTED_REQ_RE,
     )
 
 
 @app.cell
 def _(
+    CONNECT_RE,
     CREATED_RE,
+    DISCONNECT_RE,
     LOG_FILE,
     RECEIVED_RE,
     RESOLVE_RE,
+    SHUTDOWN_RE,
     WANTED_REQ_RE,
     datetime,
     defaultdict,
@@ -91,9 +111,18 @@ def _(
         created = defaultdict(list)    # node -> [(t, peers, incorporated)]
         resolved = defaultdict(list)   # node -> [(t, peer, sending)]
         wanted_reqs = defaultdict(list) # node -> [(t, peer, wanted_count)]
+        connections = defaultdict(set)  # node -> set of connected peer IDs
+        shutdown_t = None
         t0 = None
         with open(path) as f:
             for line in f:
+                # Check for shutdown marker
+                _m = SHUTDOWN_RE.search(line)
+                if _m:
+                    _elapsed, t0 = parse_timestamp(_m.group(1), t0)
+                    shutdown_t = _elapsed
+                    continue
+
                 m = RECEIVED_RE.search(line)
                 if m:
                     ts_str, _node, inc, pend, want = m.groups()
@@ -117,30 +146,71 @@ def _(
                     ts_str, _node, _peer, wanted_count, _frontier = m.groups()
                     elapsed, t0 = parse_timestamp(ts_str, t0)
                     wanted_reqs[_node].append((elapsed, _peer, int(wanted_count)))
-        return (received, created, resolved, wanted_reqs)
-    received, created, resolved, wanted_reqs = parse_log(LOG_FILE)
+                    continue
+                m = CONNECT_RE.search(line)
+                if m:
+                    ts_str, _node, _peer = m.groups()
+                    elapsed, t0 = parse_timestamp(ts_str, t0)
+                    if shutdown_t is None or elapsed < shutdown_t:
+                        connections[_node].add(_peer)
+                    continue
+                m = DISCONNECT_RE.search(line)
+                if m:
+                    ts_str, _node, _peer = m.groups()
+                    elapsed, t0 = parse_timestamp(ts_str, t0)
+                    if shutdown_t is None or elapsed < shutdown_t:
+                        connections[_node].discard(_peer)
+                    continue
+        return (received, created, resolved, wanted_reqs, connections)
+    received, created, resolved, wanted_reqs, connections = parse_log(LOG_FILE)
     print(f'Received:     {sum((len(v) for v in received.values()))} entries across {len(received)} nodes')
     print(f'Created:      {sum((len(v) for v in created.values()))} entries across {len(created)} nodes')
     print(f'Resolved:     {sum((len(v) for v in resolved.values()))} entries across {len(resolved)} nodes')
     print(f'Wanted reqs:  {sum((len(v) for v in wanted_reqs.values()))} entries across {len(wanted_reqs)} nodes')
-    return created, received, resolved, wanted_reqs
+    print(f'Connections:  {sum(len(v) for v in connections.values()) // 2} edges across {len(connections)} nodes')
+    return connections, created, received, resolved, wanted_reqs
 
 
 @app.cell
 def _(OUT_DIR, plt, received):
+    import numpy as _np
+
+    # Build a common time grid and interpolate each node's values onto it
+    _all_times = sorted({r[0] for node in received.values() for r in node})
+    _time_grid = _np.linspace(_all_times[0], _all_times[-1], 500)
+    _nodes = sorted(received.keys())
+
+    def _interpolate(node_data, idx):
+        _t = [r[0] for r in node_data]
+        _v = [r[idx] for r in node_data]
+        return _np.interp(_time_grid, _t, _v)
+
     fields = ['incorporated', 'pending', 'wanted']
     _fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
     for _ax, field, idx in zip(axes, fields, [1, 2, 3]):
-        for _node in sorted(received):
+        # Per-node lines
+        _interp_vals = []
+        for _node in _nodes:
             _data = received[_node]
             _t = [r[0] for r in _data]
             v = [r[idx] for r in _data]
             _ax.plot(_t, v, label=_node, linewidth=0.7, alpha=0.85)
+            _interp_vals.append(_interpolate(_data, idx))
+
+        # Std dev on right axis
+        _stacked = _np.vstack(_interp_vals)
+        _std = _np.std(_stacked, axis=0)
+        _ax2 = _ax.twinx()
+        _ax2.fill_between(_time_grid, _std, alpha=0.15, color='red')
+        _ax2.plot(_time_grid, _std, color='red', linewidth=1, alpha=0.6, label='std dev')
+        _ax2.set_ylabel('std dev', color='red', fontsize=8)
+        _ax2.tick_params(axis='y', labelcolor='red', labelsize=7)
+
         _ax.set_ylabel(field)
         _ax.legend(fontsize=7, ncol=5, loc='upper left')
         _ax.grid(True, alpha=0.3)
     axes[-1].set_xlabel('time (seconds from start)')
-    axes[0].set_title('Swarm node state over time')
+    axes[0].set_title('Swarm node state over time (red shading = std dev across nodes)')
     _fig.tight_layout()
     _fig.savefig(OUT_DIR / 'out_state.png', dpi=100)
     _fig
@@ -324,14 +394,19 @@ def _(OUT_DIR, plt, received, resolved, wanted_reqs):
     _fig, _axes = plt.subplots(1, 2, figsize=(14, 5))
 
     # Left: pie chart of who behind nodes asked
-    _axes[0].pie(
-        [len(ask_behind), len(ask_caught)],
-        labels=[f'Asked behind peer\n({len(ask_behind)})', f'Asked caught-up peer\n({len(ask_caught)})'],
-        colors=['#e74c3c', '#2ecc71'],
-        autopct='%1.0f%%',
-        startangle=90
-    )
-    _axes[0].set_title(f'Who do behind nodes ask for help?\n(second half, {total_asks} requests)')
+    if total_asks > 0:
+        _axes[0].pie(
+            [len(ask_behind), len(ask_caught)],
+            labels=[f'Asked behind peer\n({len(ask_behind)})', f'Asked caught-up peer\n({len(ask_caught)})'],
+            colors=['#e74c3c', '#2ecc71'],
+            autopct='%1.0f%%',
+            startangle=90
+        )
+        _axes[0].set_title(f'Who do behind nodes ask for help?\n(second half, {total_asks} requests)')
+    else:
+        _axes[0].text(0.5, 0.5, f'No behind nodes\n({len(caught_up_nodes)} caught up)',
+                      ha='center', va='center', fontsize=14, color='#2ecc71')
+        _axes[0].set_title('Who do behind nodes ask for help?')
 
     # Right: box plot of resolve batch sizes by responder type
     _bp_data = []
@@ -411,6 +486,75 @@ def _(OUT_DIR, plt, received, wanted_reqs):
     )
     _fig.tight_layout()
     _fig.savefig(OUT_DIR / 'out_wanted_timeline.png', dpi=100)
+    _fig
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Final connection topology
+
+    Shows the peer-to-peer connection graph at the end of the run (before shutdown).
+    Node size is proportional to final incorporated count. Node color indicates coverage
+    (fraction of total messages incorporated). Edge connections show which nodes are peers.
+    """)
+    return
+
+
+@app.cell
+def _(OUT_DIR, connections, plt, received):
+    import math
+
+    _all_nodes = sorted(set(connections.keys()) | set(received.keys()))
+    _total_created = max(r[1] for node in received.values() for r in node)
+
+    # Final incorporated count per node
+    _final_inc = {}
+    for _n in _all_nodes:
+        if received.get(_n):
+            _final_inc[_n] = received[_n][-1][1]
+        else:
+            _final_inc[_n] = 0
+
+    # Layout: circular
+    _n_nodes = len(_all_nodes)
+    _pos = {}
+    for _i, _n in enumerate(_all_nodes):
+        _angle = 2 * math.pi * _i / _n_nodes
+        _pos[_n] = (math.cos(_angle), math.sin(_angle))
+
+    _fig, _ax = plt.subplots(figsize=(10, 10))
+
+    # Draw edges
+    _drawn_edges = set()
+    for _n in _all_nodes:
+        for _p in connections.get(_n, set()):
+            _edge = tuple(sorted([_n, _p]))
+            if _edge not in _drawn_edges:
+                _drawn_edges.add(_edge)
+                _x = [_pos[_n][0], _pos[_p][0]]
+                _y = [_pos[_n][1], _pos[_p][1]]
+                _ax.plot(_x, _y, 'k-', alpha=0.3, linewidth=1)
+
+    # Draw nodes
+    for _n in _all_nodes:
+        _coverage = _final_inc[_n] / _total_created if _total_created > 0 else 0
+        _size = 200 + 800 * _coverage
+        _color = plt.cm.RdYlGn(_coverage)
+        _ax.scatter(*_pos[_n], s=_size, c=[_color], edgecolors='black', linewidths=1, zorder=5)
+        _label = f'{_n[:8]}\n{_final_inc[_n]}'
+        _ax.annotate(_label, _pos[_n], textcoords="offset points",
+                     xytext=(0, -20), ha='center', fontsize=7)
+
+    _ax.set_title(f'Final connection topology ({len(_drawn_edges)} edges, {_n_nodes} nodes)\n'
+                  f'Node size/color = incorporation coverage (green=high, red=low)')
+    _ax.set_xlim(-1.5, 1.5)
+    _ax.set_ylim(-1.5, 1.5)
+    _ax.set_aspect('equal')
+    _ax.axis('off')
+    _fig.tight_layout()
+    _fig.savefig(OUT_DIR / 'out_topology.png', dpi=100)
     _fig
     return
 
