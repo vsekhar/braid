@@ -27,8 +27,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	ctx, cancel := context.WithCancel(context.Background())
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		slog.Info("shutting down")
+		cancel()
+	}()
 
 	// Create nodes, each with an ephemeral identity and listening on a random port.
 	nodes := make([]*braid.Node, *n)

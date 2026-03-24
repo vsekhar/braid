@@ -102,7 +102,7 @@ func (n *Node) Run(ctx context.Context) error {
 				n.logger.Error("accept error", "err", err)
 				continue
 			}
-			n.addPeer(conn, "")
+			n.addPeer(ctx, conn, "")
 		}
 	})
 
@@ -137,10 +137,6 @@ func (n *Node) Run(ctx context.Context) error {
 
 	<-ctx.Done()
 	n.listener.Close()
-	// Close all peer connections so read loops unblock.
-	for _, p := range n.peers.All() {
-		p.Conn.Close()
-	}
 	n.wg.Wait()
 	return ctx.Err()
 }
@@ -156,11 +152,11 @@ func (n *Node) Connect(ctx context.Context, addr string) error {
 	if err != nil {
 		return fmt.Errorf("dialing %s: %w", addr, err)
 	}
-	n.addPeer(conn, addr)
+	n.addPeer(ctx, conn, addr)
 	return nil
 }
 
-func (n *Node) addPeer(conn net.Conn, listenAddr string) {
+func (n *Node) addPeer(ctx context.Context, conn net.Conn, listenAddr string) {
 	tlsConn := conn.(*tls.Conn)
 	peerKey, err := PeerPublicKeyFromTLS(tlsConn)
 	if err != nil {
@@ -180,11 +176,14 @@ func (n *Node) addPeer(conn net.Conn, listenAddr string) {
 
 	// Start read loop for this peer.
 	n.wg.Go(func() {
-		n.readLoop(p)
+		n.readLoop(ctx, p)
 	})
 }
 
-func (n *Node) readLoop(p *Peer) {
+func (n *Node) readLoop(ctx context.Context, p *Peer) {
+	// Close the connection when the context is cancelled, unblocking ReadEnvelope.
+	stop := context.AfterFunc(ctx, func() { p.Conn.Close() })
+	defer stop()
 	defer func() {
 		n.peers.Remove(p.Key)
 		p.Conn.Close()
