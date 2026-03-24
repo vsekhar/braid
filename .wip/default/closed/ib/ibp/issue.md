@@ -2,7 +2,7 @@
 priority: p2
 type: task
 created: 2026-03-24T16:47:31-04:00
-updated: 2026-03-24T16:47:31-04:00
+updated: 2026-03-24T16:50:26-04:00
 ---
 
 # Implement reactive resolution for pending messages
@@ -100,3 +100,9 @@ Keep the existing `wantedLoop` as a fallback. It handles edge cases:
 - [ ] Existing `wantedLoop` continues to work as a fallback
 - [ ] Existing tests pass
 - [ ] Add log line for reactive resolution requests (for analysis notebook)
+
+---
+
+_📝 Noted on 2026-03-24 16:50:26-04:00 @ git:34e6d29+local_
+
+Implemented reactive resolution. Changes: (1) store.go: Added AddResult struct, modified Add() to return it with IsPending/MissingAncestors, added transitiveMissing() BFS walk; (2) node.go: handleMessage() now takes *Peer param, sends immediate MessageRequest to sender when message goes to pending. All tests pass, no new dead code.

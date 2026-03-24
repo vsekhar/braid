@@ -16,7 +16,7 @@ const messageInterval = 500 * time.Millisecond
 const gossipInterval = 7 * time.Second
 const connectInterval = 3 * time.Second
 const wantedInterval = 5 * time.Second
-const targetConnections = 5
+const targetConnections = 8
 const targetConnectionsEpsilon = 2
 
 // NodeConfig configures a Node.
@@ -197,7 +197,7 @@ func (n *Node) readLoop(p *Peer) {
 		}
 		switch body := env.Body.(type) {
 		case *Envelope_Message:
-			n.handleMessage(body.Message)
+			n.handleMessage(p, body.Message)
 		case *Envelope_PeerGossip:
 			n.handleGossip(body.PeerGossip)
 		case *Envelope_MessageRequest:
@@ -211,18 +211,33 @@ func (n *Node) readLoop(p *Peer) {
 	}
 }
 
-func (n *Node) handleMessage(msg *Message) {
-	ref, isNew, err := n.store.Add(msg)
+func (n *Node) handleMessage(p *Peer, msg *Message) {
+	result, err := n.store.Add(msg)
 	if err != nil {
 		n.logger.Error("failed to add message", "err", err)
 		return
 	}
-	if !isNew {
+	if !result.IsNew {
 		return
 	}
-	n.logger.Info("received message", "ref", refKey(ref)[:8],
+	n.logger.Info("received message", "ref", refKey(result.Ref)[:8],
 		"incorporated", n.store.Len(), "pending", n.store.PendingLen(),
 		"wanted", len(n.store.Wanted()))
+
+	// Reactive resolution: immediately request missing ancestors from sender.
+	if result.IsPending && len(result.MissingAncestors) > 0 {
+		env := &Envelope{
+			Body: &Envelope_MessageRequest{
+				MessageRequest: &MessageRequest{
+					Wanted:   result.MissingAncestors,
+					Frontier: n.store.Frontier(),
+				},
+			},
+		}
+		n.logger.Info("reactive resolution", "peer", publicKeyID(p.Key)[:8],
+			"missing", len(result.MissingAncestors))
+		p.Send(env)
+	}
 }
 
 func (n *Node) handleGossip(gossip *PeerGossip) {

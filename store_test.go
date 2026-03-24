@@ -135,7 +135,7 @@ func TestStore_CreateMessageBranching(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = s.Add(branchA)
+	_, err = s.Add(branchA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestStore_CreateMessageBranching(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = s.Add(branchB)
+	_, err = s.Add(branchB)
 	if err != nil {
 		t.Fatal(err)
 	}

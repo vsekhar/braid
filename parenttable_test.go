@@ -24,11 +24,11 @@ func addMsg(t *testing.T, s *Store, id *Identity, parents *ParentTable) (*Messag
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref, _, err := s.Add(msg)
+	result, err := s.Add(msg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return msg, ref
+	return msg, result.Ref
 }
 
 func emptyParents() *ParentTable {
@@ -314,7 +314,7 @@ func TestVerifyParentTableByConstruction(t *testing.T) {
 	}
 
 	// Add the message so the store has it for verification context.
-	_, _, err = s.Add(msg)
+	_, err = s.Add(msg)
 	if err != nil {
 		t.Fatal(err)
 	}

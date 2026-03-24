@@ -50,14 +50,21 @@ func NewStore() *Store {
 	}
 }
 
+// AddResult describes the outcome of a Store.Add call.
+type AddResult struct {
+	Ref              *MessageRef
+	IsNew            bool
+	IsPending        bool
+	MissingAncestors []*MessageRef // transitive missing ancestors (only if IsPending)
+}
+
 // Add attempts to incorporate a message into the store. If parents are
 // missing, the message is buffered as pending and the missing parent refs
-// are added to the wanted set. Returns the message's ref and whether it
-// was newly added (not a duplicate).
-func (s *Store) Add(msg *Message) (*MessageRef, bool, error) {
+// are added to the wanted set.
+func (s *Store) Add(msg *Message) (AddResult, error) {
 	ref, err := HashMessage(msg)
 	if err != nil {
-		return nil, false, fmt.Errorf("hashing message: %w", err)
+		return AddResult{}, fmt.Errorf("hashing message: %w", err)
 	}
 	key := refKey(ref)
 
@@ -66,10 +73,10 @@ func (s *Store) Add(msg *Message) (*MessageRef, bool, error) {
 
 	// Skip duplicates.
 	if _, ok := s.vertices[key]; ok {
-		return ref, false, nil
+		return AddResult{Ref: ref}, nil
 	}
 	if _, ok := s.pending[key]; ok {
-		return ref, false, nil
+		return AddResult{Ref: ref}, nil
 	}
 
 	// Check which parents are missing.
@@ -83,10 +90,10 @@ func (s *Store) Add(msg *Message) (*MessageRef, bool, error) {
 
 	if len(missingParents) == 0 {
 		if ok, _ := s.verifyParentTable(msg); !ok {
-			return ref, false, fmt.Errorf("invalid parent table")
+			return AddResult{Ref: ref}, fmt.Errorf("invalid parent table")
 		}
 		s.incorporate(key, ref, msg)
-		return ref, true, nil
+		return AddResult{Ref: ref, IsNew: true}, nil
 	}
 
 	// Buffer as pending.
@@ -99,7 +106,11 @@ func (s *Store) Add(msg *Message) (*MessageRef, bool, error) {
 		s.blockedBy[pk][key] = struct{}{}
 		s.wanted[pk] = struct{}{}
 	}
-	return ref, true, nil
+
+	// Compute transitive missing ancestors for reactive resolution.
+	missingAncestors := s.transitiveMissing(msg)
+
+	return AddResult{Ref: ref, IsNew: true, IsPending: true, MissingAncestors: missingAncestors}, nil
 }
 
 // incorporate adds a message to the incorporated store and cascades to
@@ -165,6 +176,54 @@ func (s *Store) incorporate(key string, ref *MessageRef, msg *Message) {
 	}
 }
 
+// transitiveMissing walks backward from msg's parents to find all refs that
+// are neither incorporated nor pending — these are the refs we need from peers.
+// Caller must hold s.mu.
+func (s *Store) transitiveMissing(msg *Message) []*MessageRef {
+	visited := make(map[string]struct{})
+	var result []*MessageRef
+
+	// Seed with the message's direct parents.
+	queue := make([]string, 0, len(msg.GetParents().GetEntries()))
+	for _, entry := range msg.GetParents().GetEntries() {
+		pk := refKey(entry.GetParent())
+		if _, ok := visited[pk]; ok {
+			continue
+		}
+		visited[pk] = struct{}{}
+		queue = append(queue, pk)
+	}
+
+	for len(queue) > 0 {
+		k := queue[0]
+		queue = queue[1:]
+
+		if _, ok := s.vertices[k]; ok {
+			// Incorporated — stop, we have it.
+			continue
+		}
+
+		if pmsg, ok := s.pending[k]; ok {
+			// Pending — present but blocked. Walk into its parents.
+			for _, entry := range pmsg.GetParents().GetEntries() {
+				pk := refKey(entry.GetParent())
+				if _, ok := visited[pk]; ok {
+					continue
+				}
+				visited[pk] = struct{}{}
+				queue = append(queue, pk)
+			}
+			continue
+		}
+
+		// Neither incorporated nor pending — we need this ref.
+		b, _ := hex.DecodeString(k)
+		result = append(result, &MessageRef{Sha256V1: b})
+	}
+
+	return result
+}
+
 // CreateMessage builds a parent table from the store's frontier, constructs
 // a new signed message, adds it to the store, and returns the message and
 // its ref.
@@ -174,11 +233,11 @@ func (s *Store) CreateMessage(id *Identity) (*Message, *MessageRef, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	ref, _, err := s.Add(msg)
+	result, err := s.Add(msg)
 	if err != nil {
 		return nil, nil, err
 	}
-	return msg, ref, nil
+	return msg, result.Ref, nil
 }
 
 // Get returns an incorporated message by ref.
@@ -230,7 +289,7 @@ func (s *Store) Wanted() []*MessageRef {
 	return out
 }
 
-const maxResolve = 1000
+const maxResolve = 5000
 
 // Resolve walks backward from the wanted refs through incorporated and
 // pending messages, stopping at refs in the frontier set or when the walk
