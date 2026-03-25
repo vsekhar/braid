@@ -68,11 +68,21 @@ func main() {
 		})
 	}
 
-	// Connect nodes in a line: 0->1->2->...->n-1.
-	for i := 1; i < len(nodes); i++ {
-		prevAddr := nodes[i-1].Addr().String()
-		if err := nodes[i].Connect(ctx, prevAddr); err != nil {
-			slog.Error("connect failed", "from", nodes[i].ID(), "to", nodes[i-1].ID(), "err", err)
+	// Ring 1: each node connected to the next (wrapping around).
+	for i := range len(nodes) {
+		j := (i + 1) % len(nodes)
+		if err := nodes[i].Connect(ctx, nodes[j].Addr().String()); err != nil {
+			slog.Error("connect failed", "from", nodes[i].ID(), "to", nodes[j].ID(), "err", err)
+		}
+	}
+
+	// Ring 2: each node connected to the node len/2 spots ahead (wrapping around).
+	// This minimizes the max distance between any two nodes.
+	half := len(nodes) / 2
+	for i := range len(nodes) {
+		j := (i + half) % len(nodes)
+		if err := nodes[i].Connect(ctx, nodes[j].Addr().String()); err != nil {
+			slog.Error("connect failed", "from", nodes[i].ID(), "to", nodes[j].ID(), "err", err)
 		}
 	}
 
