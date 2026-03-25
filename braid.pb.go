@@ -442,6 +442,63 @@ func (x *MessageRequest) GetFrontier() []*MessageRef {
 	return nil
 }
 
+// HaveWant is exchanged continuously between peers to discover what each
+// is missing. 'have' refs describe the sender's state (proposed cut);
+// 'want' refs are messages the sender needs. Unrecognized have refs
+// become wants for the receiver; fulfillable want refs are sent as
+// regular Message protobufs on the data plane.
+type HaveWant struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Have          []*MessageRef          `protobuf:"bytes,1,rep,name=have" json:"have,omitempty"`
+	Want          []*MessageRef          `protobuf:"bytes,2,rep,name=want" json:"want,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HaveWant) Reset() {
+	*x = HaveWant{}
+	mi := &file_braid_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HaveWant) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HaveWant) ProtoMessage() {}
+
+func (x *HaveWant) ProtoReflect() protoreflect.Message {
+	mi := &file_braid_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HaveWant.ProtoReflect.Descriptor instead.
+func (*HaveWant) Descriptor() ([]byte, []int) {
+	return file_braid_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *HaveWant) GetHave() []*MessageRef {
+	if x != nil {
+		return x.Have
+	}
+	return nil
+}
+
+func (x *HaveWant) GetWant() []*MessageRef {
+	if x != nil {
+		return x.Want
+	}
+	return nil
+}
+
 // Envelope is the wire format for peer-to-peer communication.
 // Each envelope is sent as a varint-encoded length prefix followed
 // by the serialized Envelope bytes.
@@ -452,6 +509,7 @@ type Envelope struct {
 	//	*Envelope_Message
 	//	*Envelope_PeerGossip
 	//	*Envelope_MessageRequest
+	//	*Envelope_HaveWant
 	Body          isEnvelope_Body `protobuf_oneof:"body"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -459,7 +517,7 @@ type Envelope struct {
 
 func (x *Envelope) Reset() {
 	*x = Envelope{}
-	mi := &file_braid_proto_msgTypes[8]
+	mi := &file_braid_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -471,7 +529,7 @@ func (x *Envelope) String() string {
 func (*Envelope) ProtoMessage() {}
 
 func (x *Envelope) ProtoReflect() protoreflect.Message {
-	mi := &file_braid_proto_msgTypes[8]
+	mi := &file_braid_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -484,7 +542,7 @@ func (x *Envelope) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Envelope.ProtoReflect.Descriptor instead.
 func (*Envelope) Descriptor() ([]byte, []int) {
-	return file_braid_proto_rawDescGZIP(), []int{8}
+	return file_braid_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *Envelope) GetBody() isEnvelope_Body {
@@ -521,6 +579,15 @@ func (x *Envelope) GetMessageRequest() *MessageRequest {
 	return nil
 }
 
+func (x *Envelope) GetHaveWant() *HaveWant {
+	if x != nil {
+		if x, ok := x.Body.(*Envelope_HaveWant); ok {
+			return x.HaveWant
+		}
+	}
+	return nil
+}
+
 type isEnvelope_Body interface {
 	isEnvelope_Body()
 }
@@ -537,11 +604,17 @@ type Envelope_MessageRequest struct {
 	MessageRequest *MessageRequest `protobuf:"bytes,3,opt,name=message_request,json=messageRequest,oneof"`
 }
 
+type Envelope_HaveWant struct {
+	HaveWant *HaveWant `protobuf:"bytes,4,opt,name=have_want,json=haveWant,oneof"`
+}
+
 func (*Envelope_Message) isEnvelope_Body() {}
 
 func (*Envelope_PeerGossip) isEnvelope_Body() {}
 
 func (*Envelope_MessageRequest) isEnvelope_Body() {}
+
+func (*Envelope_HaveWant) isEnvelope_Body() {}
 
 type ParentTable_Entry struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -553,7 +626,7 @@ type ParentTable_Entry struct {
 
 func (x *ParentTable_Entry) Reset() {
 	*x = ParentTable_Entry{}
-	mi := &file_braid_proto_msgTypes[9]
+	mi := &file_braid_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -565,7 +638,7 @@ func (x *ParentTable_Entry) String() string {
 func (*ParentTable_Entry) ProtoMessage() {}
 
 func (x *ParentTable_Entry) ProtoReflect() protoreflect.Message {
-	mi := &file_braid_proto_msgTypes[9]
+	mi := &file_braid_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -627,12 +700,16 @@ const file_braid_proto_rawDesc = "" +
 	"\x05peers\x18\x01 \x03(\v2\x0f.braid.PeerInfoR\x05peers\"j\n" +
 	"\x0eMessageRequest\x12)\n" +
 	"\x06wanted\x18\x01 \x03(\v2\x11.braid.MessageRefR\x06wanted\x12-\n" +
-	"\bfrontier\x18\x02 \x03(\v2\x11.braid.MessageRefR\bfrontier\"\xb6\x01\n" +
+	"\bfrontier\x18\x02 \x03(\v2\x11.braid.MessageRefR\bfrontier\"X\n" +
+	"\bHaveWant\x12%\n" +
+	"\x04have\x18\x01 \x03(\v2\x11.braid.MessageRefR\x04have\x12%\n" +
+	"\x04want\x18\x02 \x03(\v2\x11.braid.MessageRefR\x04want\"\xe6\x01\n" +
 	"\bEnvelope\x12*\n" +
 	"\amessage\x18\x01 \x01(\v2\x0e.braid.MessageH\x00R\amessage\x124\n" +
 	"\vpeer_gossip\x18\x02 \x01(\v2\x11.braid.PeerGossipH\x00R\n" +
 	"peerGossip\x12@\n" +
-	"\x0fmessage_request\x18\x03 \x01(\v2\x15.braid.MessageRequestH\x00R\x0emessageRequestB\x06\n" +
+	"\x0fmessage_request\x18\x03 \x01(\v2\x15.braid.MessageRequestH\x00R\x0emessageRequest\x12.\n" +
+	"\thave_want\x18\x04 \x01(\v2\x0f.braid.HaveWantH\x00R\bhaveWantB\x06\n" +
 	"\x04bodyB\x1aZ\x18github.com/vsekhar/braidb\beditionsp\xe8\a"
 
 var (
@@ -647,7 +724,7 @@ func file_braid_proto_rawDescGZIP() []byte {
 	return file_braid_proto_rawDescData
 }
 
-var file_braid_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_braid_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_braid_proto_goTypes = []any{
 	(*MessageRef)(nil),            // 0: braid.MessageRef
 	(*PublicKey)(nil),             // 1: braid.PublicKey
@@ -657,13 +734,14 @@ var file_braid_proto_goTypes = []any{
 	(*PeerInfo)(nil),              // 5: braid.PeerInfo
 	(*PeerGossip)(nil),            // 6: braid.PeerGossip
 	(*MessageRequest)(nil),        // 7: braid.MessageRequest
-	(*Envelope)(nil),              // 8: braid.Envelope
-	(*ParentTable_Entry)(nil),     // 9: braid.ParentTable.Entry
-	(*timestamppb.Timestamp)(nil), // 10: google.protobuf.Timestamp
+	(*HaveWant)(nil),              // 8: braid.HaveWant
+	(*Envelope)(nil),              // 9: braid.Envelope
+	(*ParentTable_Entry)(nil),     // 10: braid.ParentTable.Entry
+	(*timestamppb.Timestamp)(nil), // 11: google.protobuf.Timestamp
 }
 var file_braid_proto_depIdxs = []int32{
-	9,  // 0: braid.ParentTable.entries:type_name -> braid.ParentTable.Entry
-	10, // 1: braid.Message.timestamp:type_name -> google.protobuf.Timestamp
+	10, // 0: braid.ParentTable.entries:type_name -> braid.ParentTable.Entry
+	11, // 1: braid.Message.timestamp:type_name -> google.protobuf.Timestamp
 	3,  // 2: braid.Message.parents:type_name -> braid.ParentTable
 	1,  // 3: braid.Message.author:type_name -> braid.PublicKey
 	2,  // 4: braid.Message.signature:type_name -> braid.Signature
@@ -671,15 +749,18 @@ var file_braid_proto_depIdxs = []int32{
 	5,  // 6: braid.PeerGossip.peers:type_name -> braid.PeerInfo
 	0,  // 7: braid.MessageRequest.wanted:type_name -> braid.MessageRef
 	0,  // 8: braid.MessageRequest.frontier:type_name -> braid.MessageRef
-	4,  // 9: braid.Envelope.message:type_name -> braid.Message
-	6,  // 10: braid.Envelope.peer_gossip:type_name -> braid.PeerGossip
-	7,  // 11: braid.Envelope.message_request:type_name -> braid.MessageRequest
-	0,  // 12: braid.ParentTable.Entry.parent:type_name -> braid.MessageRef
-	13, // [13:13] is the sub-list for method output_type
-	13, // [13:13] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	0,  // 9: braid.HaveWant.have:type_name -> braid.MessageRef
+	0,  // 10: braid.HaveWant.want:type_name -> braid.MessageRef
+	4,  // 11: braid.Envelope.message:type_name -> braid.Message
+	6,  // 12: braid.Envelope.peer_gossip:type_name -> braid.PeerGossip
+	7,  // 13: braid.Envelope.message_request:type_name -> braid.MessageRequest
+	8,  // 14: braid.Envelope.have_want:type_name -> braid.HaveWant
+	0,  // 15: braid.ParentTable.Entry.parent:type_name -> braid.MessageRef
+	16, // [16:16] is the sub-list for method output_type
+	16, // [16:16] is the sub-list for method input_type
+	16, // [16:16] is the sub-list for extension type_name
+	16, // [16:16] is the sub-list for extension extendee
+	0,  // [0:16] is the sub-list for field type_name
 }
 
 func init() { file_braid_proto_init() }
@@ -687,10 +768,11 @@ func file_braid_proto_init() {
 	if File_braid_proto != nil {
 		return
 	}
-	file_braid_proto_msgTypes[8].OneofWrappers = []any{
+	file_braid_proto_msgTypes[9].OneofWrappers = []any{
 		(*Envelope_Message)(nil),
 		(*Envelope_PeerGossip)(nil),
 		(*Envelope_MessageRequest)(nil),
+		(*Envelope_HaveWant)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -698,7 +780,7 @@ func file_braid_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_braid_proto_rawDesc), len(file_braid_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   10,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

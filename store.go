@@ -291,6 +291,53 @@ func (s *Store) Wanted() []*MessageRef {
 
 const maxResolve = 5000
 
+// ResolveForward walks forward from the shared frontier through children
+// pointers, collecting descendant messages. These are messages the peer is
+// missing on branches covered by the shared frontier. Returns messages and
+// their refKeys (same order), capped at maxResolve.
+func (s *Store) ResolveForward(sharedFrontier map[string]struct{}) (msgs []*Message, keys []string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	visited := make(map[string]struct{})
+	var queue []*vertex
+
+	// Seed with children of shared frontier refs that aren't already in
+	// the shared frontier.
+	for k := range sharedFrontier {
+		v, ok := s.vertices[k]
+		if !ok {
+			continue
+		}
+		for _, child := range v.children {
+			if _, ok := sharedFrontier[child.key]; ok {
+				continue
+			}
+			if _, ok := visited[child.key]; ok {
+				continue
+			}
+			visited[child.key] = struct{}{}
+			queue = append(queue, child)
+		}
+	}
+
+	for len(queue) > 0 && len(msgs) < maxResolve {
+		v := queue[0]
+		queue = queue[1:]
+		msgs = append(msgs, v.msg)
+		keys = append(keys, v.key)
+		for _, child := range v.children {
+			if _, ok := visited[child.key]; ok {
+				continue
+			}
+			visited[child.key] = struct{}{}
+			queue = append(queue, child)
+		}
+	}
+
+	return msgs, keys
+}
+
 // Resolve walks backward from the wanted refs through incorporated and
 // pending messages, stopping at refs in the frontier set or when the walk
 // cap is reached. Returns the collected messages (no particular order).
@@ -352,6 +399,36 @@ func (s *Store) Resolve(wanted []*MessageRef, frontier []*MessageRef) []*Message
 	}
 
 	return result
+}
+
+// Has reports whether the store recognizes a ref (incorporated or pending).
+func (s *Store) Has(ref *MessageRef) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	k := refKey(ref)
+	if _, ok := s.vertices[k]; ok {
+		return true
+	}
+	_, ok := s.pending[k]
+	return ok
+}
+
+// AddWanted adds refs to the wanted set. This is used by the have/want
+// protocol to request refs that a peer has but this node does not.
+func (s *Store) AddWanted(refs []*MessageRef) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, ref := range refs {
+		k := refKey(ref)
+		// Only add if we don't already have it.
+		if _, ok := s.vertices[k]; ok {
+			continue
+		}
+		if _, ok := s.pending[k]; ok {
+			continue
+		}
+		s.wanted[k] = struct{}{}
+	}
 }
 
 // Len returns the number of incorporated messages.

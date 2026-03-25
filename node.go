@@ -15,7 +15,7 @@ import (
 const messageInterval = 500 * time.Millisecond
 const gossipInterval = 7 * time.Second
 const connectInterval = 3 * time.Second
-const wantedInterval = 5 * time.Second
+const haveWantInterval = 2 * time.Second
 const targetConnections = 8
 const targetConnectionsEpsilon = 2
 
@@ -125,9 +125,9 @@ func (n *Node) Run(ctx context.Context) error {
 		n.connectLoop(ctx)
 	})
 
-	// Wanted request loop.
+	// Have/want synchronization loop.
 	n.wg.Go(func() {
-		n.wantedLoop(ctx)
+		n.haveWantLoop(ctx)
 	})
 
 	// Message creation loop.
@@ -167,10 +167,11 @@ func (n *Node) addPeer(ctx context.Context, conn net.Conn, listenAddr string) {
 	n.directory.Add(peerKey, listenAddr)
 	n.directory.ResetErrors(peerKey)
 	p := &Peer{
-		Key:         peerKey,
-		Conn:        conn,
-		ConnectedAt: time.Now(),
-		sendCh:      make(chan *Envelope, 8192),
+		Key:            peerKey,
+		Conn:           conn,
+		ConnectedAt:    time.Now(),
+		sendCh:         make(chan *Envelope, 8192),
+		sharedFrontier: make(map[string]struct{}),
 	}
 	n.peers.Add(p)
 	n.logger.Info("connected", "peer", publicKeyID(peerKey)[:8])
@@ -219,6 +220,8 @@ func (n *Node) readLoop(ctx context.Context, p *Peer) {
 			n.handleGossip(body.PeerGossip)
 		case *Envelope_MessageRequest:
 			n.handleMessageRequest(p, body.MessageRequest)
+		case *Envelope_HaveWant:
+			n.handleHaveWant(p, body.HaveWant)
 		default:
 			unknown := env.ProtoReflect().GetUnknown()
 			num, typ, length := protowire.ConsumeField(unknown)
@@ -240,21 +243,6 @@ func (n *Node) handleMessage(p *Peer, msg *Message) {
 	n.logger.Info("received message", "ref", refKey(result.Ref)[:8],
 		"incorporated", n.store.Len(), "pending", n.store.PendingLen(),
 		"wanted", len(n.store.Wanted()))
-
-	// Reactive resolution: immediately request missing ancestors from sender.
-	if result.IsPending && len(result.MissingAncestors) > 0 {
-		env := &Envelope{
-			Body: &Envelope_MessageRequest{
-				MessageRequest: &MessageRequest{
-					Wanted:   result.MissingAncestors,
-					Frontier: n.store.Frontier(),
-				},
-			},
-		}
-		n.logger.Info("reactive resolution", "peer", publicKeyID(p.Key)[:8],
-			"missing", len(result.MissingAncestors))
-		p.Enqueue(env)
-	}
 }
 
 func (n *Node) handleGossip(gossip *PeerGossip) {
@@ -284,40 +272,105 @@ func (n *Node) handleMessageRequest(p *Peer, req *MessageRequest) {
 	}
 }
 
-func (n *Node) wantedLoop(ctx context.Context) {
-	ticker := time.NewTicker(wantedInterval)
+func (n *Node) haveWantLoop(ctx context.Context) {
+	ticker := time.NewTicker(haveWantInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			n.sendMessageRequest()
+			n.sendHaveWant()
 		}
 	}
 }
 
-func (n *Node) sendMessageRequest() {
-	wanted := n.store.Wanted()
-	if len(wanted) == 0 {
-		return
-	}
-	p := n.peers.Random()
-	if p == nil {
-		return
-	}
+func (n *Node) sendHaveWant() {
 	frontier := n.store.Frontier()
+	wanted := n.store.Wanted()
+	if len(frontier) == 0 && len(wanted) == 0 {
+		return
+	}
 	env := &Envelope{
-		Body: &Envelope_MessageRequest{
-			MessageRequest: &MessageRequest{
-				Wanted:   wanted,
-				Frontier: frontier,
+		Body: &Envelope_HaveWant{
+			HaveWant: &HaveWant{
+				Have: frontier,
+				Want: wanted,
 			},
 		},
 	}
-	n.logger.Info("sending wanted request", "peer", publicKeyID(p.Key)[:8],
-		"wanted", len(wanted), "frontier", len(frontier))
-	p.Enqueue(env)
+	for _, p := range n.peers.All() {
+		p.Enqueue(env)
+	}
+}
+
+func (n *Node) handleHaveWant(p *Peer, hw *HaveWant) {
+	// Process have refs: recognized refs grow the shared frontier,
+	// unrecognized refs become our wants.
+	var newWants []*MessageRef
+	for _, ref := range hw.GetHave() {
+		k := refKey(ref)
+		if msg, ok := n.store.Get(ref); ok {
+			// Incorporated — use as shared frontier.
+			p.advanceSharedFrontier(k, msg)
+		} else if !n.store.Has(ref) {
+			// Neither incorporated nor pending — we want it.
+			newWants = append(newWants, ref)
+		}
+		// Pending refs are recognized (not added to wants) but can't
+		// serve as shared frontier since we lack children pointers.
+	}
+	if len(newWants) > 0 {
+		n.store.AddWanted(newWants)
+		n.logger.Info("have/want: discovered gaps", "peer", publicKeyID(p.Key)[:8],
+			"new_wants", len(newWants))
+	}
+
+	// Bulk transfer: walk forward from shared frontier through children,
+	// sending all descendant messages the peer is missing.
+	sentKeys := make(map[string]struct{})
+	if len(p.sharedFrontier) > 0 {
+		msgs, keys := n.store.ResolveForward(p.sharedFrontier)
+		for i, msg := range msgs {
+			env := &Envelope{
+				Body: &Envelope_Message{Message: msg},
+			}
+			if !p.Enqueue(env) {
+				break
+			}
+			sentKeys[keys[i]] = struct{}{}
+			p.advanceSharedFrontier(keys[i], msg)
+		}
+		if len(sentKeys) > 0 {
+			n.logger.Info("have/want: bulk transfer", "peer", publicKeyID(p.Key)[:8],
+				"sent", len(sentKeys))
+		}
+	}
+
+	// Fulfill individual want refs not covered by the forward walk.
+	var fulfilled int
+	for _, ref := range hw.GetWant() {
+		k := refKey(ref)
+		if _, ok := sentKeys[k]; ok {
+			continue
+		}
+		msg, ok := n.store.Get(ref)
+		if !ok {
+			continue
+		}
+		env := &Envelope{
+			Body: &Envelope_Message{Message: msg},
+		}
+		if !p.Enqueue(env) {
+			break
+		}
+		p.advanceSharedFrontier(k, msg)
+		fulfilled++
+	}
+	if fulfilled > 0 {
+		n.logger.Info("have/want: fulfilled wants", "peer", publicKeyID(p.Key)[:8],
+			"sent", fulfilled)
+	}
 }
 
 func (n *Node) connectLoop(ctx context.Context) {

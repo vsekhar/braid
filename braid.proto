@@ -75,6 +75,16 @@ message MessageRequest {
   repeated MessageRef frontier = 2;
 }
 
+// HaveWant is exchanged continuously between peers to discover what each
+// is missing. 'have' refs describe the sender's state (proposed cut);
+// 'want' refs are messages the sender needs. Unrecognized have refs
+// become wants for the receiver; fulfillable want refs are sent as
+// regular Message protobufs on the data plane.
+message HaveWant {
+  repeated MessageRef have = 1;
+  repeated MessageRef want = 2;
+}
+
 // Envelope is the wire format for peer-to-peer communication.
 // Each envelope is sent as a varint-encoded length prefix followed
 // by the serialized Envelope bytes.
@@ -83,5 +93,6 @@ message Envelope {
     Message message = 1;
     PeerGossip peer_gossip = 2;
     MessageRequest message_request = 3;
+    HaveWant have_want = 4;
   }
 }

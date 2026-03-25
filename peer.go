@@ -14,6 +14,20 @@ type Peer struct {
 	Conn        net.Conn
 	ConnectedAt time.Time
 	sendCh      chan *Envelope
+
+	// sharedFrontier tracks refs known to be on both sides of this
+	// connection. It is only accessed from the peer's readLoop goroutine.
+	sharedFrontier map[string]struct{}
+}
+
+// advanceSharedFrontier adds a ref to the shared frontier and removes any of
+// its parents that were previously in the frontier. This keeps the shared
+// frontier minimal — only the tips of the known-shared region.
+func (p *Peer) advanceSharedFrontier(key string, msg *Message) {
+	p.sharedFrontier[key] = struct{}{}
+	for _, entry := range msg.GetParents().GetEntries() {
+		delete(p.sharedFrontier, refKey(entry.GetParent()))
+	}
 }
 
 // Enqueue adds an envelope to the peer's send queue. Returns false if the

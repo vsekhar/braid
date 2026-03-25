@@ -2,7 +2,7 @@
 priority: p2
 type: feature
 created: 2026-03-24T21:57:45-04:00
-updated: 2026-03-24T22:22:34-04:00
+updated: 2026-03-24T22:56:36-04:00
 ---
 
 # Implement have/want negotiation protocol for efficient resolve
@@ -101,3 +101,30 @@ As content flows (Messages sent in response to `want` refs), the receiving node 
 - [ ] Exchange runs continuously per peer; no-op when in sync
 - [ ] Works bidirectionally — both nodes learn simultaneously
 - [ ] Backward compatible: nodes handle peers that don't support the new protocol
+
+---
+
+_📝 Noted on 2026-03-24 22:34:22-04:00 @ git:40a6c76+local_
+
+Implemented have/want negotiation protocol:
+- Added HaveWant proto message (have + want repeated MessageRef) to Envelope oneof (field 4)
+- Added Store.Has(ref) to check if ref is in vertices or pending
+- Added Store.AddWanted(refs) to externally add refs to wanted set (for unrecognized have refs)
+- Replaced wantedLoop/sendMessageRequest with haveWantLoop/sendHaveWant: sends HaveWant{have: frontier, want: wanted} to ALL peers every 2s
+- Added handleHaveWant: unrecognized have refs → AddWanted; fulfillable want refs → send Messages
+- Removed reactive resolution from handleMessage (have/want exchange handles it)
+- Kept handleMessageRequest/Resolve for backward compat with old nodes
+- All tests pass, no new dead code introduced
+
+---
+
+_📝 Noted on 2026-03-24 22:56:36-04:00 @ git:40a6c76+local_
+
+Added forward walk from shared frontier for bulk transfer:
+- Per-peer sharedFrontier (map[string]struct{}) tracks refs known to both sides
+- On receive HaveWant: recognized have refs grow sharedFrontier
+- Store.ResolveForward walks forward from sharedFrontier through children pointers, collecting descendant messages (capped at maxResolve)
+- handleHaveWant does bulk transfer via forward walk, then fulfills individual wants not covered
+- sharedFrontier advances with sent refs to prevent re-sending
+- Forward walk can't reach genesis (walks forward, not backward)
+- Unknown branches discovered via have/want exchange, then covered by forward walk in next round
