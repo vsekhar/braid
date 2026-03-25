@@ -170,14 +170,31 @@ func (n *Node) addPeer(ctx context.Context, conn net.Conn, listenAddr string) {
 		Key:         peerKey,
 		Conn:        conn,
 		ConnectedAt: time.Now(),
+		sendCh:      make(chan *Envelope, 8192),
 	}
 	n.peers.Add(p)
 	n.logger.Info("connected", "peer", publicKeyID(peerKey)[:8])
 
-	// Start read loop for this peer.
+	// Start read and write loops for this peer.
 	n.wg.Go(func() {
 		n.readLoop(ctx, p)
 	})
+	n.wg.Go(func() {
+		n.writeLoop(ctx, p)
+	})
+}
+
+func (n *Node) writeLoop(ctx context.Context, p *Peer) {
+	stop := context.AfterFunc(ctx, func() { p.Conn.Close() })
+	defer stop()
+	for env := range p.sendCh {
+		if err := WriteEnvelope(p.Conn, env); err != nil {
+			p.Conn.Close() // unblocks readLoop
+			for range p.sendCh {
+			}
+			return
+		}
+	}
 }
 
 func (n *Node) readLoop(ctx context.Context, p *Peer) {
@@ -187,6 +204,7 @@ func (n *Node) readLoop(ctx context.Context, p *Peer) {
 	defer func() {
 		n.peers.Remove(p.Key)
 		p.Conn.Close()
+		close(p.sendCh) // signal writeLoop to exit
 		n.logger.Info("disconnected from peer", "peer", publicKeyID(p.Key)[:8])
 	}()
 	for {
@@ -235,7 +253,7 @@ func (n *Node) handleMessage(p *Peer, msg *Message) {
 		}
 		n.logger.Info("reactive resolution", "peer", publicKeyID(p.Key)[:8],
 			"missing", len(result.MissingAncestors))
-		p.Send(env)
+		p.Enqueue(env)
 	}
 }
 
@@ -260,7 +278,7 @@ func (n *Node) handleMessageRequest(p *Peer, req *MessageRequest) {
 		env := &Envelope{
 			Body: &Envelope_Message{Message: msg},
 		}
-		if err := p.Send(env); err != nil {
+		if !p.Enqueue(env) {
 			return
 		}
 	}
@@ -299,7 +317,7 @@ func (n *Node) sendMessageRequest() {
 	}
 	n.logger.Info("sending wanted request", "peer", publicKeyID(p.Key)[:8],
 		"wanted", len(wanted), "frontier", len(frontier))
-	p.Send(env)
+	p.Enqueue(env)
 }
 
 func (n *Node) connectLoop(ctx context.Context) {
@@ -364,7 +382,7 @@ func (n *Node) pushGossip() {
 			PeerGossip: &PeerGossip{Peers: infos},
 		},
 	}
-	p.Send(env)
+	p.Enqueue(env)
 }
 
 func (n *Node) messageLoop(ctx context.Context) {
@@ -391,7 +409,7 @@ func (n *Node) pushMessage() {
 	}
 	peers := n.peers.RandomN(5)
 	for _, p := range peers {
-		p.Send(env)
+		p.Enqueue(env)
 	}
 	n.logger.Info("created message", "ref", refKey(ref)[:8],
 		"peers", len(peers), "incorporated", n.store.Len())

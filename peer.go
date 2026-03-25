@@ -13,16 +13,18 @@ type Peer struct {
 	Key         *PublicKey
 	Conn        net.Conn
 	ConnectedAt time.Time
+	sendCh      chan *Envelope
 }
 
-// Send writes an envelope to the peer's connection. On error it closes the
-// connection (triggering readLoop cleanup) and returns the error.
-func (p *Peer) Send(env *Envelope) error {
-	if err := WriteEnvelope(p.Conn, env); err != nil {
-		p.Conn.Close()
-		return err
+// Enqueue adds an envelope to the peer's send queue. Returns false if the
+// queue is full (caller should log/drop).
+func (p *Peer) Enqueue(env *Envelope) bool {
+	select {
+	case p.sendCh <- env:
+		return true
+	default:
+		return false
 	}
-	return nil
 }
 
 // PeerSet is a thread-safe set of active peers keyed by public key.

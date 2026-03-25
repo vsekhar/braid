@@ -2,7 +2,7 @@
 priority: p1
 type: task
 created: 2026-03-24T19:38:12-04:00
-updated: 2026-03-24T19:38:12-04:00
+updated: 2026-03-24T19:41:12-04:00
 ---
 
 # Add per-peer buffered send channel with writeLoop
@@ -128,3 +128,9 @@ Start with 256. This accommodates bursts (e.g. resolve responses of many message
 - [ ] Write errors in `writeLoop` close the conn (unblocking `readLoop`)
 - [ ] Existing tests pass
 - [ ] Long swarm runs no longer exhibit write deadlocks
+
+---
+
+_📝 Noted on 2026-03-24 19:41:12-04:00 @ git:d4c2743+local_
+
+Implemented per-peer buffered send channel with writeLoop. Added sendCh (buffered 256) to Peer struct, Enqueue() non-blocking method, writeLoop goroutine per peer. Replaced all 5 p.Send() call sites in node.go with p.Enqueue(). readLoop closes sendCh on exit to signal writeLoop. writeLoop closes conn on write error to unblock readLoop. All tests pass, no new dead code.
