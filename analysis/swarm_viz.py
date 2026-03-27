@@ -36,7 +36,7 @@ def _():
 @app.cell
 def _(Path, mo, re):
     _notebook_dir = Path(mo.notebook_dir())
-    LOG_FILE = str(_notebook_dir / "../swarm5.log")
+    LOG_FILE = str(_notebook_dir / "../swarm4.log")
     OUT_DIR = _notebook_dir
 
     RECEIVED_RE = re.compile(
@@ -73,10 +73,28 @@ def _(Path, mo, re):
     SHUTDOWN_RE = re.compile(
         r'time=(\S+)\s+level=\S+\s+msg="shutting down"'
     )
+
+    HW_GAPS_RE = re.compile(
+        r'time=(\S+)\s+level=\S+\s+msg="have/want: discovered gaps"\s+'
+        r'node=([0-9a-f]+)\s+peer=([0-9a-f]+)\s+new_wants=(\d+)'
+    )
+
+    HW_FULFILLED_RE = re.compile(
+        r'time=(\S+)\s+level=\S+\s+msg="have/want: fulfilled wants"\s+'
+        r'node=([0-9a-f]+)\s+peer=([0-9a-f]+)\s+sent=(\d+)'
+    )
+
+    HW_BULK_RE = re.compile(
+        r'time=(\S+)\s+level=\S+\s+msg="have/want: bulk transfer"\s+'
+        r'node=([0-9a-f]+)\s+peer=([0-9a-f]+)\s+sent=(\d+)'
+    )
     return (
         CONNECT_RE,
         CREATED_RE,
         DISCONNECT_RE,
+        HW_BULK_RE,
+        HW_FULFILLED_RE,
+        HW_GAPS_RE,
         LOG_FILE,
         OUT_DIR,
         RECEIVED_RE,
@@ -91,6 +109,9 @@ def _(
     CONNECT_RE,
     CREATED_RE,
     DISCONNECT_RE,
+    HW_BULK_RE,
+    HW_FULFILLED_RE,
+    HW_GAPS_RE,
     LOG_FILE,
     RECEIVED_RE,
     RESOLVE_RE,
@@ -112,6 +133,9 @@ def _(
         resolved = defaultdict(list)   # node -> [(t, peer, sending)]
         wanted_reqs = defaultdict(list) # node -> [(t, peer, wanted_count)]
         connections = defaultdict(set)  # node -> set of connected peer IDs
+        hw_gaps = defaultdict(list)     # node -> [(t, peer, new_wants)]
+        hw_fulfilled = defaultdict(list) # node -> [(t, peer, sent)]
+        hw_bulk = defaultdict(list)     # node -> [(t, peer, sent)]
         shutdown_t = None
         t0 = None
         with open(path) as f:
@@ -147,6 +171,24 @@ def _(
                     elapsed, t0 = parse_timestamp(ts_str, t0)
                     wanted_reqs[_node].append((elapsed, _peer, int(wanted_count)))
                     continue
+                m = HW_GAPS_RE.search(line)
+                if m:
+                    ts_str, _node, _peer, _new_wants = m.groups()
+                    elapsed, t0 = parse_timestamp(ts_str, t0)
+                    hw_gaps[_node].append((elapsed, _peer, int(_new_wants)))
+                    continue
+                m = HW_FULFILLED_RE.search(line)
+                if m:
+                    ts_str, _node, _peer, _sent = m.groups()
+                    elapsed, t0 = parse_timestamp(ts_str, t0)
+                    hw_fulfilled[_node].append((elapsed, _peer, int(_sent)))
+                    continue
+                m = HW_BULK_RE.search(line)
+                if m:
+                    ts_str, _node, _peer, _sent = m.groups()
+                    elapsed, t0 = parse_timestamp(ts_str, t0)
+                    hw_bulk[_node].append((elapsed, _peer, int(_sent)))
+                    continue
                 m = CONNECT_RE.search(line)
                 if m:
                     ts_str, _node, _peer = m.groups()
@@ -161,14 +203,30 @@ def _(
                     if shutdown_t is None or elapsed < shutdown_t:
                         connections[_node].discard(_peer)
                     continue
-        return (received, created, resolved, wanted_reqs, connections)
-    received, created, resolved, wanted_reqs, connections = parse_log(LOG_FILE)
-    print(f'Received:     {sum((len(v) for v in received.values()))} entries across {len(received)} nodes')
-    print(f'Created:      {sum((len(v) for v in created.values()))} entries across {len(created)} nodes')
-    print(f'Resolved:     {sum((len(v) for v in resolved.values()))} entries across {len(resolved)} nodes')
-    print(f'Wanted reqs:  {sum((len(v) for v in wanted_reqs.values()))} entries across {len(wanted_reqs)} nodes')
+        return (received, created, resolved, wanted_reqs, connections, hw_gaps, hw_fulfilled, hw_bulk)
+    received, created, resolved, wanted_reqs, connections, hw_gaps, hw_fulfilled, hw_bulk = parse_log(LOG_FILE)
+    _hw_total = (sum(len(v) for v in hw_gaps.values())
+               + sum(len(v) for v in hw_fulfilled.values())
+               + sum(len(v) for v in hw_bulk.values()))
+    _hw_msgs_sent = (sum(r[2] for v in hw_fulfilled.values() for r in v)
+                   + sum(r[2] for v in hw_bulk.values() for r in v))
+    print(f'Received:     {sum(len(v) for v in received.values())} entries across {len(received)} nodes')
+    print(f'Created:      {sum(len(v) for v in created.values())} entries across {len(created)} nodes')
+    print(f'Have/want:    {_hw_total} events ({sum(len(v) for v in hw_gaps.values())} gaps, '
+          f'{sum(len(v) for v in hw_fulfilled.values())} fulfilled, '
+          f'{sum(len(v) for v in hw_bulk.values())} bulk), '
+          f'{_hw_msgs_sent} messages sent')
     print(f'Connections:  {sum(len(v) for v in connections.values()) // 2} edges across {len(connections)} nodes')
-    return connections, created, received, resolved, wanted_reqs
+    return (
+        connections,
+        created,
+        hw_bulk,
+        hw_fulfilled,
+        hw_gaps,
+        received,
+        resolved,
+        wanted_reqs,
+    )
 
 
 @app.cell
@@ -277,30 +335,56 @@ def _(OUT_DIR, created, plt, received):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## Resolve batch sizes over time
+    ## Have/want sync activity
 
-    Each "resolving wanted" event sends a batch of messages to a peer. If batches are hitting the `maxResolve=1000` cap, the node can't send enough messages per resolve cycle to keep up.
+    Shows the three have/want event types over time:
+    - **Discovered gaps** (red): unrecognized `have` refs became new `want` entries
+    - **Fulfilled wants** (green): messages sent in response to peer's `want` refs
+    - **Bulk transfer** (blue): larger batch sends to catch up a peer
     """)
     return
 
 
 @app.cell
-def _(OUT_DIR, plt, resolved):
-    MAX_RESOLVE = 5000  # from store.go
-    _fig, _ax = plt.subplots(figsize=(14, 4))
-    for _node in sorted(resolved):
-        _data = resolved[_node]
+def _(OUT_DIR, hw_bulk, hw_fulfilled, hw_gaps, plt):
+    _fig, _axes = plt.subplots(3, 1, figsize=(14, 8), sharex=True)
+
+    # Discovered gaps
+    for _node in sorted(hw_gaps):
+        _data = hw_gaps[_node]
         _t = [r[0] for r in _data]
-        _sending = [r[2] for r in _data]
-        _ax.scatter(_t, _sending, label=_node, s=8, alpha=0.6)
-    _ax.axhline(y=MAX_RESOLVE, color='r', linestyle='--', linewidth=1, label=f'maxResolve={MAX_RESOLVE}')
-    _ax.set_ylabel('messages sent (sending)')
-    _ax.set_xlabel('time (seconds from start)')
-    _ax.set_title('Resolve batch sizes over time')
-    _ax.legend(fontsize=7, ncol=5, loc='upper left')
-    _ax.grid(True, alpha=0.3)
+        _v = [r[2] for r in _data]
+        _axes[0].scatter(_t, _v, label=_node, s=10, alpha=0.5)
+    _axes[0].set_ylabel('new wants')
+    _axes[0].set_title('Discovered gaps (unrecognized have refs)')
+    _axes[0].legend(fontsize=6, ncol=5, loc='upper right')
+    _axes[0].grid(True, alpha=0.3)
+
+    # Fulfilled wants
+    for _node in sorted(hw_fulfilled):
+        _data = hw_fulfilled[_node]
+        _t = [r[0] for r in _data]
+        _v = [r[2] for r in _data]
+        _axes[1].scatter(_t, _v, label=_node, s=10, alpha=0.5)
+    _axes[1].set_ylabel('messages sent')
+    _axes[1].set_title('Fulfilled wants (messages sent to peer)')
+    _axes[1].legend(fontsize=6, ncol=5, loc='upper right')
+    _axes[1].grid(True, alpha=0.3)
+
+    # Bulk transfer
+    for _node in sorted(hw_bulk):
+        _data = hw_bulk[_node]
+        _t = [r[0] for r in _data]
+        _v = [r[2] for r in _data]
+        _axes[2].scatter(_t, _v, label=_node, s=10, alpha=0.5)
+    _axes[2].set_ylabel('messages sent')
+    _axes[2].set_title('Bulk transfers (larger catch-up batches)')
+    _axes[2].set_xlabel('time (seconds from start)')
+    _axes[2].legend(fontsize=6, ncol=5, loc='upper right')
+    _axes[2].grid(True, alpha=0.3)
+
     _fig.tight_layout()
-    _fig.savefig(OUT_DIR / 'out_resolve.png', dpi=100)
+    _fig.savefig(OUT_DIR / 'out_havewant.png', dpi=100)
     _fig
     return
 
