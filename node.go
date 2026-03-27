@@ -308,17 +308,26 @@ func (n *Node) handleHaveWant(p *Peer, hw *HaveWant) {
 	// Process have refs: recognized refs grow the shared frontier,
 	// unrecognized refs become our wants.
 	var newWants []*MessageRef
+	var newKeys []string
 	for _, ref := range hw.GetHave() {
 		k := refKey(ref)
 		if msg, ok := n.store.Get(ref); ok {
 			// Incorporated — use as shared frontier.
 			p.advanceSharedFrontier(k, msg)
+			newKeys = append(newKeys, k)
 		} else if !n.store.Has(ref) {
 			// Neither incorporated nor pending — we want it.
 			newWants = append(newWants, ref)
 		}
 		// Pending refs are recognized (not added to wants) but can't
 		// serve as shared frontier since we lack children pointers.
+	}
+	// advanceSharedFrontier only removes direct parents. When the peer's
+	// frontier advances multiple hops between ticks, older entries survive
+	// as stale ancestors causing ResolveForward to resend messages the
+	// peer already has. Walk backward from new entries to prune them.
+	if len(newKeys) > 0 {
+		n.store.PruneAncestors(p.sharedFrontier, newKeys)
 	}
 	if len(newWants) > 0 {
 		n.store.AddWanted(newWants)

@@ -291,6 +291,41 @@ func (s *Store) Wanted() []*MessageRef {
 
 const maxResolve = 5000
 
+// PruneAncestors removes entries from frontier that are ancestors of any
+// entry in newKeys. It walks backward through all parent pointers to find
+// and remove stale entries. Entries on independent branches (not ancestors
+// of any newKey) are preserved. The walk is O(V) in the worst case but
+// uses a shared visited set so overlapping ancestry is traversed only once.
+func (s *Store) PruneAncestors(frontier map[string]struct{}, newKeys []string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	visited := make(map[string]struct{})
+	var queue []string
+	for _, k := range newKeys {
+		visited[k] = struct{}{}
+		queue = append(queue, k)
+	}
+
+	for len(queue) > 0 {
+		k := queue[0]
+		queue = queue[1:]
+		v, ok := s.vertices[k]
+		if !ok {
+			continue
+		}
+		for _, entry := range v.msg.GetParents().GetEntries() {
+			pk := refKey(entry.GetParent())
+			if _, ok := visited[pk]; ok {
+				continue
+			}
+			visited[pk] = struct{}{}
+			delete(frontier, pk)
+			queue = append(queue, pk)
+		}
+	}
+}
+
 // ResolveForward walks forward from the shared frontier through children
 // pointers, collecting descendant messages. These are messages the peer is
 // missing on branches covered by the shared frontier. Returns messages and
