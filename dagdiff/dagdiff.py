@@ -37,8 +37,6 @@ def _(mo):
 @app.cell
 def _():
     from dataclasses import dataclass, field
-    import hashlib, itertools, random
-    from typing import Optional
 
     @dataclass
     class Msg:
@@ -46,8 +44,6 @@ def _():
         id: str
         parents: list[str] = field(default_factory=list)
         generation: int = 0
-        # computed
-        _ancestors: Optional[set] = field(default=None, repr=False)
 
     class DAG:
         """Simple in-memory DAG of messages."""
@@ -81,47 +77,6 @@ def _():
                 for p in m.parents:
                     has_child.add(p)
             return {id for id in self.msgs if id not in has_child}
-
-        def ancestors(self, id: str) -> set[str]:
-            """All ancestors of id (not including id)."""
-            m = self.msgs[id]
-            if m._ancestors is not None:
-                return m._ancestors
-            result: set[str] = set()
-            stack = list(m.parents)
-            while stack:
-                cur = stack.pop()
-                if cur in result:
-                    continue
-                result.add(cur)
-                stack.extend(self.msgs[cur].parents)
-            m._ancestors = result
-            return result
-
-        def parent_walk(self, start: str, hops: int, follow: str = "all") -> set[str]:
-            """Walk `hops` levels back through parents from `start`.
-
-            follow:
-              "all"    – follow all parents at each step
-              "branch" – follow the highest-generation parent at each step
-            Returns the set of message ids found at exactly `hops` levels back.
-            """
-            current = {start}
-            for _ in range(hops):
-                nxt: set[str] = set()
-                for cid in current:
-                    msg = self.msgs.get(cid)
-                    if msg is None or not msg.parents:
-                        continue
-                    if follow == "branch":
-                        best = max(msg.parents, key=lambda p: self.msgs[p].generation)
-                        nxt.add(best)
-                    else:
-                        nxt.update(msg.parents)
-                current = nxt
-                if not current:
-                    break
-            return current
 
         def children_of(self, ids: set[str]) -> set[str]:
             """All messages that have a parent in `ids`."""
@@ -299,80 +254,70 @@ def _(mo):
     mo.md(r"""
     ## Proposal-Based Reconciliation Algorithm
 
-    Both nodes run the algorithm simultaneously. Each node maintains a set of
-    **proposals** — refs it is currently testing with the peer. Proposals move
-    bidirectionally through the DAG (toward frontier or toward genesis) based on
-    the peer's responses, converging on the boundary between shared and unshared
-    regions.
+    Binary search over DAG paths to find the **boundary** between shared and
+    unshared regions. Each node runs the same algorithm simultaneously.
+    **Proposals** (refs being probed) expand exponentially until overshooting,
+    then narrow by halving until they pinpoint exact boundary refs.
 
-    The protocol uses three fields per message:
-    - `probe`: refs we are testing — "I have these. Do you also have these?"
-    - `have`: responses to peer's probes — "yes, I also have these"
-    - `want`: responses to peer's probes — "no, I don't have these"
+    ### Messages
 
-    **State (per peer):**
-    ```python
-    proposals: dict[str, tuple[int, int|None]]
-        # ref → (last_hop, range)
-        # last_hop: signed — positive = forward, negative = backward
-        # range: None = expansion phase (doubling allowed)
-        #        int  = narrowing phase (halving only, range shrinks each step)
+    Two message types:
+    - **ProbeRequest**: `have` — "I have these refs, do you?"
+    - **ProbeResponse**: `have`, `want` — answers to a peer's ProbeRequest
 
-    cache: dict[str, int]  # cached peer responses: ref → +1 (hit) or -1 (miss)
-                           # fast-forwards proposals on already-probed refs
-                           # refs with cache[ref] == +1 are confirmed shared —
-                           # walks skip these to avoid re-exploring shared territory
+    ### Per-peer state
+
+    ```
+    proposals: dict[ref → (direction, magnitude, range)]
+        direction: +1 (toward frontier) or -1 (toward genesis)
+        magnitude: step size (positive int)
+        range:     None = expansion phase, int = narrowing phase
+
+    hits:   set[ref]  — refs the peer has
+    misses: set[ref]  — refs the peer doesn't have
+        Cached peer responses. Proposals landing on known refs resolve
+        immediately without an extra round trip.
     ```
 
-    **Bootstrap:**
-    - Add frontier tips to proposals with `last_hop = -1, range = None`.
-    - Send `probe = [proposal refs]` (the frontier tips).
+    ### Protocol
 
-    **Tick (triggered by receiving a message from the peer):**
+    **Bootstrap:** Send ProbeRequest with own frontier. Initial proposals: `direction = -1, magnitude = 1, range = None`.
 
-    *1. Respond to peer's probes:*
-    - For each ref in peer's `probe`: check if we have it.
-      - Have it → include in our outgoing `have`.
-      - Don't have it → include in our outgoing `want`.
+    **Each tick** (process all messages in inbox):
 
-    *2. Process peer's responses to our probes:*
-    - For each ref in peer's `have` or `want`:
-      - If ref is in `proposals`: update per the hop rules below.
-      - Else: ignore (async tolerance, or peer's own protocol traffic).
+    1. **Process ProbeRequests** — for each ProbeRequest from peer:
+       - Cache `have` refs as hits (the peer has them).
+       - Send ProbeResponse with `have`/`want` for each ref.
 
-    Hop rules for proposals (ref has `last_hop` and `range`):
-      - Determine response direction: hit → forward (+1), miss → backward (-1).
-      - **Expansion phase** (`range` is None):
-        - Same direction as `last_hop`: `next_hop = last_hop * 2` (keep going).
-        - Different direction (first flip): `range = abs(last_hop)`.
-          Switch to narrowing.
-      - **Narrowing phase** (`range` is set):
-        - `next_mag = range // 2`, direction from response. `range = next_mag`.
-      - If `next_mag == 0`: **converged**.
-        - Miss → boundary ref. Remove from proposals, add to boundary.
-        - Hit → correction step: walk +1, children become proposals with
-          `last_hop = +1, range = 1`. When those children are probed:
-          miss → boundary. Hit → drop (shared ground, no boundary here).
-      - Otherwise: walk `next_hop` from ref. All refs reached become new
-        proposals inheriting `last_hop = next_hop` and the current `range`.
-        Skip refs already in `shared` (confirmed hits — no point re-probing).
-        If ALL reached refs are shared, halve and retry immediately (fast-forward
-        through confirmed shared territory). If narrowed to 0 with all shared:
-        miss → boundary, hit → drop.
-        Remove old proposal.
-    - New proposals are checked against the response cache. If a cached response
-      exists, the proposal is processed immediately (same hop rules) without
-      waiting for a round trip. This eliminates redundant probes for refs
-      reached via multiple DAG paths.
-    - Proposals with no response (and no cached response) stay unchanged (async tolerance).
+    2. **Process ProbeResponses** — for each ProbeResponse from peer:
+       - Cache `have` as hits, `want` as misses.
 
-    *3. Send probes:*
-    - Send `probe = [proposal refs]` for proposals not resolved from cache.
+    3. **Update proposals** against the cache:
 
-    **Termination:**
-    - When `proposals` is empty, all paths have converged.
-    - The converged refs (removed in step 2) are the boundary.
-    - Delta = forward walk from boundary, inclusive.
+       *Compute the next step:*
+
+       - **Expansion** (`range` is None):
+         - Same direction → double: `magnitude × 2`.
+         - Direction flips → begin narrowing: `range = magnitude`, `magnitude = range ÷ 2`.
+       - **Narrowing** (`range` is set):
+         - Halve: `magnitude = range ÷ 2`. Direction from response (hit → forward, miss → backward).
+
+       *Apply the result:*
+
+       - `magnitude = 0` → **converged**:
+         - Miss → add ref to **boundary**.
+         - Hit → **correction**: probe ref's children with `(dir=+1, mag=1, range=1)`.
+           Child miss → boundary. Child hit → drop (shared).
+       - `magnitude > 0` → **walk** `direction × magnitude` hops from ref.
+         Reached refs become new proposals. If walk goes off the DAG, retry
+         with shorter hops.
+       - No response → carry forward unchanged (async tolerance).
+
+       New proposals with cached responses are resolved immediately (recursive).
+
+    4. **Send ProbeRequest** with all remaining proposals.
+
+    **Termination:** All proposals empty → forward-walk from boundary (inclusive) = delta.
     """)
     return
 
@@ -382,26 +327,37 @@ def _():
     from dataclasses import dataclass as _dataclass
 
     @_dataclass
+    class _ProbeRequest:
+        """Probe message: sender has these refs — does the peer?"""
+        have: set
+
+    @_dataclass
+    class _ProbeResponse:
+        """Reply to a ProbeRequest: which refs the responder has or wants."""
+        have: set
+        want: set
+
+    @_dataclass
     class TickRecord:
         """What happened on one tick, from one node's perspective."""
         tick: int
         node: str                    # "A" or "B"
         # State at start of tick
-        proposals_before: dict       # ref → (last_hop, range)
-        # Received message
-        received_probe: set          # peer's probes
-        received_have: set           # peer's responses: has these
-        received_want: set           # peer's responses: doesn't have these
+        proposals_before: dict       # ref → (direction, magnitude, range)
+        # Received
+        received_probe: set          # from peer's ProbeRequest(s)
+        received_have: set           # from peer's ProbeResponse(s)
+        received_want: set           # from peer's ProbeResponse(s)
         # What happened
         converged_this_tick: set      # refs that converged (boundary misses)
         correction_this_tick: set     # refs that need correction step (boundary hits)
         # State after update
-        proposals_after: dict        # ref → (last_hop, range)
+        proposals_after: dict        # ref → (direction, magnitude, range)
         boundary: set                # all converged boundary refs so far
-        # Message sent
-        sent_probe: set
-        sent_have: set
-        sent_want: set
+        # Sent
+        sent_probe: set              # our ProbeRequest
+        sent_have: set               # our ProbeResponse
+        sent_want: set               # our ProbeResponse
 
     def _walk(dag, ref, hop):
         """Walk `hop` from ref. Positive = forward (children), negative = backward (parents).
@@ -414,10 +370,8 @@ def _():
             nxt = set()
             for cid in current:
                 if hop > 0:
-                    # Forward: find children
                     nxt.update(dag.children_of({cid}))
                 else:
-                    # Backward: follow parents
                     msg = dag.msgs.get(cid)
                     if msg:
                         nxt.update(msg.parents)
@@ -431,132 +385,138 @@ def _():
         dag_b: "DAG",
         max_ticks: int = 30,
     ) -> list[TickRecord]:
-        """Simulate proposal-based bidirectional reconciliation between A and B."""
+        """Simulate proposal-based reconciliation between A and B
+        using explicit request/response message passing."""
 
-        # Per-node state
-        proposals_a = {f: (-1, None) for f in dag_a.frontier()}
-        proposals_b = {f: (-1, None) for f in dag_b.frontier()}
+        # Per-node state: ref → (direction, magnitude, range)
+        proposals_a = {f: (-1, 1, None) for f in dag_a.frontier()}
+        proposals_b = {f: (-1, 1, None) for f in dag_b.frontier()}
         boundary_a: set[str] = set()
         boundary_b: set[str] = set()
-        cache_a: dict[str, int] = {}  # cached peer responses: ref → +1 or -1
-        cache_b: dict[str, int] = {}
+        hits_a: set[str] = set()   # refs the peer confirmed having
+        misses_a: set[str] = set() # refs the peer confirmed not having
+        hits_b: set[str] = set()
+        misses_b: set[str] = set()
         records: list[TickRecord] = []
 
-        # Bootstrap: probes are the frontier tips (already in proposals)
-        a_probe = set(proposals_a.keys())
-        a_have: set[str] = set()
-        a_want: set[str] = set()
-        b_probe = set(proposals_b.keys())
-        b_have: set[str] = set()
-        b_want: set[str] = set()
+        # Bootstrap: each node sends a ProbeRequest with its frontier.
+        # A's ProbeRequest goes to B's inbox; B's goes to A's inbox.
+        inbox_a: list = [_ProbeRequest(have=set(proposals_b.keys()))]
+        inbox_b: list = [_ProbeRequest(have=set(proposals_a.keys()))]
 
         for tick in range(max_ticks):
-            for node, my_dag, peer_dag, proposals, boundary, cache, \
-                recv_probe, recv_have, recv_want in [
-                ("A", dag_a, dag_b, proposals_a, boundary_a, cache_a,
-                 b_probe, b_have, b_want),
-                ("B", dag_b, dag_a, proposals_b, boundary_b, cache_b,
-                 a_probe, a_have, a_want),
+            outbox_a: list = []  # A sends these → B receives next tick
+            outbox_b: list = []  # B sends these → A receives next tick
+
+            for node, my_dag, proposals, boundary, hits, misses, inbox, outbox in [
+                ("A", dag_a, proposals_a, boundary_a, hits_a, misses_a, inbox_a, outbox_a),
+                ("B", dag_b, proposals_b, boundary_b, hits_b, misses_b, inbox_b, outbox_b),
             ]:
                 proposals_before = dict(proposals)
+                requests = [m for m in inbox if isinstance(m, _ProbeRequest)]
+                responses = [m for m in inbox if isinstance(m, _ProbeResponse)]
 
-                # --- 1. Respond to peer's probes ---
+                # --- 1. Process ProbeRequests → send ProbeResponse ---
+                all_recv_probe = set()
                 out_have = set()
                 out_want = set()
-                for ref in recv_probe:
-                    if my_dag.has(ref):
-                        out_have.add(ref)
-                    else:
-                        out_want.add(ref)
+                for req in requests:
+                    all_recv_probe |= req.have
+                    for ref in req.have:
+                        hits.add(ref)  # probe refs are implicit hits
+                        misses.discard(ref)
+                        if my_dag.has(ref):
+                            out_have.add(ref)
+                        else:
+                            out_want.add(ref)
+                if out_have or out_want:
+                    outbox.append(_ProbeResponse(have=out_have, want=out_want))
 
-                # --- 2. Process peer's responses to our probes ---
+                # --- 2. Process ProbeResponses → update cache ---
+                all_recv_have = set()
+                all_recv_want = set()
+                for resp in responses:
+                    all_recv_have |= resp.have
+                    all_recv_want |= resp.want
+                    hits.update(resp.have)
+                    misses.update(resp.want)
+                    misses -= resp.have  # explicit have overrides prior miss
+                    hits -= resp.want    # explicit want overrides prior hit
+
+                # --- 3. Update proposals against cache ---
                 converged = set()
                 correction = set()
 
-                # Cache incoming responses
-                for ref in recv_have:
-                    cache[ref] = 1   # hit
-                for ref in recv_want:
-                    cache[ref] = -1  # miss
-
-                def _is_shared(ref):
-                    return cache.get(ref) == 1
-
-                def _process_proposal(ref, last_hop, rng, new_proposals):
-                    """Process a single proposal against cache. May recurse
+                def _process_proposal(ref, direction, magnitude, rng, new_proposals):
+                    """Process a single proposal against hits/misses. May recurse
                     for new proposals that have cached responses."""
-                    if ref not in cache:
-                        # No response — carry forward unchanged
-                        new_proposals[ref] = (last_hop, rng)
+                    is_hit = ref in hits
+                    is_miss = ref in misses
+                    if not is_hit and not is_miss:
+                        new_proposals[ref] = (direction, magnitude, rng)
                         return
 
-                    response_dir = cache[ref]
-                    last_sign = 1 if last_hop > 0 else -1
-                    last_mag = abs(last_hop)
+                    resp_dir = 1 if is_hit else -1
 
                     if rng is None:
-                        if last_sign == response_dir:
-                            next_mag = last_mag * 2
+                        # Expansion phase
+                        if direction == resp_dir:
+                            next_mag = magnitude * 2
                             next_rng = None
                         else:
-                            next_rng = last_mag
-                            next_mag = last_mag // 2
+                            next_rng = magnitude
+                            next_mag = magnitude // 2
                     else:
+                        # Narrowing phase
                         next_mag = rng // 2
                         next_rng = next_mag
 
                     if next_mag == 0:
-                        if response_dir == -1:
+                        # Converged
+                        if is_miss:
                             converged.add(ref)
                             boundary.add(ref)
                         else:
+                            # Correction: probe children to find exact boundary
                             correction.add(ref)
-                            reached = _walk(my_dag, ref, 1)
-                            for r in reached:
-                                if r not in boundary and r not in new_proposals and not _is_shared(r):
-                                    _process_proposal(r, 1, 1, new_proposals)
+                            for r in _walk(my_dag, ref, 1):
+                                if r not in boundary and r not in new_proposals:
+                                    _process_proposal(r, 1, 1, 1, new_proposals)
                     else:
-                        # Walk with retry through confirmed shared territory
-                        while next_mag > 0:
-                            next_hop = response_dir * next_mag
-                            reached = _walk(my_dag, ref, next_hop)
-                            reached_new = {r for r in reached
-                                           if r not in boundary
-                                           and r not in new_proposals
-                                           and not _is_shared(r)}
-                            if reached_new:
-                                for r in reached_new:
-                                    _process_proposal(r, next_hop, next_rng, new_proposals)
-                                break
-                            reached_tracked = {r for r in reached if r in new_proposals}
-                            if reached_tracked:
-                                break  # covered by another path
-                            # All reached refs are confirmed shared — narrow.
-                            next_mag = next_mag // 2
-                            if next_rng is not None:
-                                next_rng = next_mag
-                        else:
-                            # Narrowed to 0 with all shared. Converge.
-                            if response_dir == -1:
-                                converged.add(ref)
-                                boundary.add(ref)
+                        # Walk; shorten hop if it goes off the DAG
+                        reached = set()
+                        walk_mag = next_mag
+                        while walk_mag > 0 and not reached:
+                            reached = _walk(my_dag, ref, resp_dir * walk_mag)
+                            if not reached:
+                                walk_mag //= 2
+                                if next_rng is not None:
+                                    next_rng = walk_mag
+                        if reached:
+                            for r in reached:
+                                if r not in boundary and r not in new_proposals:
+                                    _process_proposal(r, resp_dir, walk_mag, next_rng, new_proposals)
+                        elif is_miss:
+                            converged.add(ref)
+                            boundary.add(ref)
 
                 new_proposals = {}
-                for ref, (last_hop, rng) in proposals.items():
-                    _process_proposal(ref, last_hop, rng, new_proposals)
-
+                for ref, (direction, magnitude, rng) in proposals.items():
+                    _process_proposal(ref, direction, magnitude, rng, new_proposals)
                 proposals.clear()
                 proposals.update(new_proposals)
 
-                # --- 3. Build outgoing probe (non-converged proposals) ---
+                # --- 4. Send ProbeRequest for remaining proposals ---
                 out_probe = set(proposals.keys())
+                if out_probe:
+                    outbox.append(_ProbeRequest(have=out_probe))
 
                 records.append(TickRecord(
                     tick=tick, node=node,
                     proposals_before=proposals_before,
-                    received_probe=set(recv_probe),
-                    received_have=set(recv_have),
-                    received_want=set(recv_want),
+                    received_probe=all_recv_probe,
+                    received_have=all_recv_have,
+                    received_want=all_recv_want,
                     converged_this_tick=converged,
                     correction_this_tick=correction,
                     proposals_after=dict(proposals),
@@ -566,32 +526,10 @@ def _():
                     sent_want=out_want,
                 ))
 
-            # Wire up messages for next tick
-            a_probe_next = set()
-            a_have_next = set()
-            a_want_next = set()
-            b_probe_next = set()
-            b_have_next = set()
-            b_want_next = set()
+            # Deliver: A's outbox → B's next inbox, and vice versa
+            inbox_a = outbox_b
+            inbox_b = outbox_a
 
-            for r in records[-2:]:  # last two records (A and B for this tick)
-                if r.node == "A":
-                    a_probe_next = r.sent_probe
-                    a_have_next = r.sent_have
-                    a_want_next = r.sent_want
-                else:
-                    b_probe_next = r.sent_probe
-                    b_have_next = r.sent_have
-                    b_want_next = r.sent_want
-
-            a_probe = a_probe_next
-            a_have = a_have_next
-            a_want = a_want_next
-            b_probe = b_probe_next
-            b_have = b_have_next
-            b_want = b_want_next
-
-            # Check termination
             if not proposals_a and not proposals_b:
                 break
 
@@ -606,14 +544,17 @@ def _(dag_a, dag_b, dag_info, mo, run_duplex_reconciliation):
 
     def _fmt_msg(probe, have, want):
         parts = []
-        if probe: parts.append(f"probe=`{probe}`")
-        if have: parts.append(f"have=`{have}`")
-        if want: parts.append(f"want=`{want}`")
-        return ", ".join(parts) if parts else "*(empty)*"
+        if probe: parts.append(f"**req** `{probe}`")
+        if have or want:
+            r = []
+            if have: r.append(f"have=`{have}`")
+            if want: r.append(f"want=`{want}`")
+            parts.append(f"**resp** {', '.join(r)}")
+        return "<br>".join(parts) if parts else "*(empty)*"
 
     def _fmt_state(proposals, boundary, converged=None, correction=None):
-        # Format proposals as ref: (hop, range) for readability
-        p_str = ", ".join(f"{r}:({h},{rn})" for r, (h, rn) in sorted(proposals.items())) if proposals else "{}"
+        # Format proposals as ref: (dir, mag, range) for readability
+        p_str = ", ".join(f"{r}:({d},{m},{rn})" for r, (d, m, rn) in sorted(proposals.items())) if proposals else "{}"
         parts = [f"proposals=`{{{p_str}}}`"]
         if boundary: parts.append(f"boundary=`{boundary}`")
         if converged: parts.append(f"converged=`{converged}`")
@@ -737,7 +678,7 @@ def _(dag_a, dag_b, dag_info, draw_dag, mo, tick_selector, trace):
             active=set(_a.proposals_after.keys()), boundary=_a.boundary,
         )
         _figs.append(_fig_a)
-        _a_p = ", ".join(f"{r}:({h},{rn})" for r, (h, rn) in sorted(_a.proposals_after.items()))
+        _a_p = ", ".join(f"{r}:({d},{m},{rn})" for r, (d, m, rn) in sorted(_a.proposals_after.items()))
         _figs.append(mo.md(f"**A proposals:** `{{{_a_p}}}` | **boundary:** `{_a.boundary}`"))
 
     if _b:
@@ -747,7 +688,7 @@ def _(dag_a, dag_b, dag_info, draw_dag, mo, tick_selector, trace):
             active=set(_b.proposals_after.keys()), boundary=_b.boundary,
         )
         _figs.append(_fig_b)
-        _b_p = ", ".join(f"{r}:({h},{rn})" for r, (h, rn) in sorted(_b.proposals_after.items()))
+        _b_p = ", ".join(f"{r}:({d},{m},{rn})" for r, (d, m, rn) in sorted(_b.proposals_after.items()))
         _figs.append(mo.md(f"**B proposals:** `{{{_b_p}}}` | **boundary:** `{_b.boundary}`"))
 
     if not _figs:
