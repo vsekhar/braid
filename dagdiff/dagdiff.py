@@ -49,7 +49,8 @@ def _():
         """Simple in-memory DAG of messages."""
 
         def __init__(self):
-            self.msgs: dict[str, Msg] = {}  # id → Msg
+            self.msgs: dict[str, Msg] = {}  # id → Msg (incorporated)
+            self.pending: set[str] = set()  # ids present but not incorporated
 
         def copy(self) -> "DAG":
             d = DAG()
@@ -59,6 +60,7 @@ def _():
                     parents=list(m.parents),
                     generation=m.generation,
                 )
+            d.pending = set(self.pending)
             return d
 
         def add(self, id: str, parents: list[str]) -> Msg:
@@ -67,8 +69,18 @@ def _():
             self.msgs[m.id] = m
             return m
 
-        def has(self, id: str) -> bool:
+        def add_pending(self, id: str) -> None:
+            """Mark an id as pending (have bytes, not incorporated)."""
+            self.pending.add(id)
+
+        def has_incorporated(self, id: str) -> bool:
             return id in self.msgs
+
+        def has_pending(self, id: str) -> bool:
+            return id in self.pending
+
+        def has(self, id: str) -> bool:
+            return id in self.msgs or id in self.pending
 
         def frontier(self) -> set[str]:
             """Messages with no children."""
@@ -155,11 +167,16 @@ def _(DAG, mo):
         dag_b = base.copy()
         dag_b.add("b1", ["c2"])
         dag_b.add("b2", ["b1"])
+        # B also has some of A's messages as pending (has bytes, not incorporated).
+        # This simulates receiving a3 and a4 via push but missing their ancestors.
+        dag_b.add_pending("a3")
+        dag_b.add_pending("a4")
 
         info = {
             "shared": set(base.msgs.keys()),
             "only_a": set(dag_a.msgs.keys()) - set(base.msgs.keys()),
             "only_b": set(dag_b.msgs.keys()) - set(base.msgs.keys()),
+            "pending_b": set(dag_b.pending),
         }
         return dag_a, dag_b, info
 
@@ -168,13 +185,15 @@ def _(DAG, mo):
     mo.md(f"""
     **Node A**: {len(dag_a.msgs)} messages, frontier = `{dag_a.frontier()}`
 
-    **Node B**: {len(dag_b.msgs)} messages, frontier = `{dag_b.frontier()}`
+    **Node B**: {len(dag_b.msgs)} messages, frontier = `{dag_b.frontier()}`, pending = `{dag_b.pending}`
 
     **Shared**: {len(dag_info['shared'])} messages
 
     **Only A**: `{dag_info['only_a']}`
 
     **Only B**: `{dag_info['only_b']}`
+
+    **Pending on B**: `{dag_info['pending_b']}` (B has bytes but not incorporated — ancestors missing)
     """)
     return dag_a, dag_b, dag_info
 
@@ -263,7 +282,11 @@ def _(mo):
 
     Two message types:
     - **ProbeRequest**: `have` — "I have these refs, do you?"
-    - **ProbeResponse**: `have`, `want` — answers to a peer's ProbeRequest
+    - **ProbeResponse**: `have`, `want`, `pending` — answers to a peer's ProbeRequest
+
+    The three-way response separates two concerns:
+    - **Boundary detection** needs `have` (incorporated, with ancestor guarantees) vs everything else
+    - **Delta construction** needs to know what the peer already has bytes for (`have` + `pending`) to avoid redundant sends
 
     ### Per-peer state
 
@@ -273,8 +296,9 @@ def _(mo):
         magnitude: step size (positive int)
         range:     None = expansion phase, int = narrowing phase
 
-    hits:   set[ref]  — refs the peer has
-    misses: set[ref]  — refs the peer doesn't have
+    hits:   set[ref]  — refs the peer has (incorporated)
+    misses: set[ref]  — refs the peer doesn't have (want + pending for navigation)
+    peer_has: set[ref] — refs the peer has bytes for (incorporated + pending, for delta filtering)
         Cached peer responses. Proposals landing on known refs resolve
         immediately without an extra round trip.
     ```
@@ -287,10 +311,11 @@ def _(mo):
 
     1. **Process ProbeRequests** — for each ProbeRequest from peer:
        - Cache `have` refs as hits (the peer has them).
-       - Send ProbeResponse with `have`/`want` for each ref.
+       - Send ProbeResponse with `have`/`want`/`pending` for each ref.
 
     2. **Process ProbeResponses** — for each ProbeResponse from peer:
-       - Cache `have` as hits, `want` as misses.
+       - Cache `have` as hits, `want` and `pending` as misses (for boundary navigation).
+       - Cache `have` and `pending` into `peer_has` (for delta filtering).
 
     3. **Update proposals** against the cache:
 
@@ -317,7 +342,7 @@ def _(mo):
 
     4. **Send ProbeRequest** with all remaining proposals.
 
-    **Termination:** All proposals empty → forward-walk from boundary (inclusive) = delta.
+    **Termination:** All proposals empty → forward-walk from boundary (inclusive), filtering out refs in `peer_has` = delta.
     """)
     return
 
@@ -333,9 +358,10 @@ def _():
 
     @_dataclass
     class _ProbeResponse:
-        """Reply to a ProbeRequest: which refs the responder has or wants."""
-        have: set
-        want: set
+        """Reply to a ProbeRequest: three-way classification."""
+        have: set     # incorporated (hit for DAGdiff, skip in delta)
+        want: set     # unknown (miss for DAGdiff, include in delta)
+        pending: set  # has bytes but not incorporated (miss for DAGdiff, skip in delta)
 
     @_dataclass
     class TickRecord:
@@ -348,16 +374,19 @@ def _():
         received_probe: set          # from peer's ProbeRequest(s)
         received_have: set           # from peer's ProbeResponse(s)
         received_want: set           # from peer's ProbeResponse(s)
+        received_pending: set        # from peer's ProbeResponse(s)
         # What happened
         converged_this_tick: set      # refs that converged (boundary misses)
         correction_this_tick: set     # refs that need correction step (boundary hits)
         # State after update
         proposals_after: dict        # ref → (direction, magnitude, range)
         boundary: set                # all converged boundary refs so far
+        peer_has: set                # refs peer has bytes for (incorporated + pending)
         # Sent
         sent_probe: set              # our ProbeRequest
         sent_have: set               # our ProbeResponse
         sent_want: set               # our ProbeResponse
+        sent_pending: set            # our ProbeResponse
 
     def _walk(dag, ref, hop):
         """Walk `hop` from ref. Positive = forward (children), negative = backward (parents).
@@ -393,10 +422,12 @@ def _():
         proposals_b = {f: (-1, 1, None) for f in dag_b.frontier()}
         boundary_a: set[str] = set()
         boundary_b: set[str] = set()
-        hits_a: set[str] = set()   # refs the peer confirmed having
-        misses_a: set[str] = set() # refs the peer confirmed not having
+        hits_a: set[str] = set()   # refs the peer confirmed having (incorporated)
+        misses_a: set[str] = set() # refs the peer doesn't have usably (want + pending)
         hits_b: set[str] = set()
         misses_b: set[str] = set()
+        peer_has_a: set[str] = set()  # refs peer has bytes for (incorporated + pending)
+        peer_has_b: set[str] = set()
         records: list[TickRecord] = []
 
         # Bootstrap: each node sends a ProbeRequest with its frontier.
@@ -408,9 +439,9 @@ def _():
             outbox_a: list = []  # A sends these → B receives next tick
             outbox_b: list = []  # B sends these → A receives next tick
 
-            for node, my_dag, proposals, boundary, hits, misses, inbox, outbox in [
-                ("A", dag_a, proposals_a, boundary_a, hits_a, misses_a, inbox_a, outbox_a),
-                ("B", dag_b, proposals_b, boundary_b, hits_b, misses_b, inbox_b, outbox_b),
+            for node, my_dag, proposals, boundary, hits, misses, peer_has, inbox, outbox in [
+                ("A", dag_a, proposals_a, boundary_a, hits_a, misses_a, peer_has_a, inbox_a, outbox_a),
+                ("B", dag_b, proposals_b, boundary_b, hits_b, misses_b, peer_has_b, inbox_b, outbox_b),
             ]:
                 proposals_before = dict(proposals)
                 requests = [m for m in inbox if isinstance(m, _ProbeRequest)]
@@ -420,28 +451,41 @@ def _():
                 all_recv_probe = set()
                 out_have = set()
                 out_want = set()
+                out_pending = set()
                 for req in requests:
                     all_recv_probe |= req.have
                     for ref in req.have:
-                        hits.add(ref)  # probe refs are implicit hits
+                        hits.add(ref)  # probe refs are implicit hits (peer has them)
                         misses.discard(ref)
-                        if my_dag.has(ref):
+                        peer_has.add(ref)
+                        if my_dag.has_incorporated(ref):
                             out_have.add(ref)
+                        elif my_dag.has_pending(ref):
+                            out_pending.add(ref)
                         else:
                             out_want.add(ref)
-                if out_have or out_want:
-                    outbox.append(_ProbeResponse(have=out_have, want=out_want))
+                if out_have or out_want or out_pending:
+                    outbox.append(_ProbeResponse(have=out_have, want=out_want, pending=out_pending))
 
                 # --- 2. Process ProbeResponses → update cache ---
                 all_recv_have = set()
                 all_recv_want = set()
+                all_recv_pending = set()
                 for resp in responses:
                     all_recv_have |= resp.have
                     all_recv_want |= resp.want
+                    all_recv_pending |= resp.pending
+                    # hits = incorporated only (for DAGdiff navigation)
                     hits.update(resp.have)
+                    hits -= resp.want
+                    hits -= resp.pending
+                    # misses = want + pending (for DAGdiff navigation)
                     misses.update(resp.want)
-                    misses -= resp.have  # explicit have overrides prior miss
-                    hits -= resp.want    # explicit want overrides prior hit
+                    misses.update(resp.pending)
+                    misses -= resp.have
+                    # peer_has = have + pending (for delta filtering)
+                    peer_has.update(resp.have)
+                    peer_has.update(resp.pending)
 
                 # --- 3. Update proposals against cache ---
                 converged = set()
@@ -517,13 +561,16 @@ def _():
                     received_probe=all_recv_probe,
                     received_have=all_recv_have,
                     received_want=all_recv_want,
+                    received_pending=all_recv_pending,
                     converged_this_tick=converged,
                     correction_this_tick=correction,
                     proposals_after=dict(proposals),
                     boundary=set(boundary),
+                    peer_has=set(peer_has),
                     sent_probe=out_probe,
                     sent_have=out_have,
                     sent_want=out_want,
+                    sent_pending=out_pending,
                 ))
 
             # Deliver: A's outbox → B's next inbox, and vice versa
@@ -542,21 +589,22 @@ def _():
 def _(dag_a, dag_b, dag_info, mo, run_duplex_reconciliation):
     trace = run_duplex_reconciliation(dag_a, dag_b)
 
-    def _fmt_msg(probe, have, want):
+    def _fmt_msg(probe, have, want, pending=None):
         parts = []
         if probe: parts.append(f"**req** `{probe}`")
-        if have or want:
+        if have or want or pending:
             r = []
             if have: r.append(f"have=`{have}`")
             if want: r.append(f"want=`{want}`")
+            if pending: r.append(f"pending=`{pending}`")
             parts.append(f"**resp** {', '.join(r)}")
         return "<br>".join(parts) if parts else "*(empty)*"
 
-    def _fmt_state(proposals, boundary, converged=None, correction=None):
-        # Format proposals as ref: (dir, mag, range) for readability
+    def _fmt_state(proposals, boundary, peer_has=None, converged=None, correction=None):
         p_str = ", ".join(f"{r}:({d},{m},{rn})" for r, (d, m, rn) in sorted(proposals.items())) if proposals else "{}"
         parts = [f"proposals=`{{{p_str}}}`"]
         if boundary: parts.append(f"boundary=`{boundary}`")
+        if peer_has: parts.append(f"peer_has=`{peer_has}`")
         if converged: parts.append(f"converged=`{converged}`")
         if correction: parts.append(f"correction=`{correction}`")
         return "<br>".join(parts)
@@ -585,23 +633,24 @@ def _(dag_a, dag_b, dag_info, mo, run_duplex_reconciliation):
         a = a_by_tick.get(tick)
         b = b_by_tick.get(tick)
 
-        # A ← B: what A received (= what B sent last tick)
         a_recv = _fmt_msg(
             a.received_probe if a else set(),
             a.received_have if a else set(),
             a.received_want if a else set(),
+            a.received_pending if a else set(),
         ) if a else ""
 
-        # A → B: what A sends this tick
         a_send = _fmt_msg(
             a.sent_probe if a else set(),
             a.sent_have if a else set(),
             a.sent_want if a else set(),
+            a.sent_pending if a else set(),
         ) if a else ""
 
         a_state = _fmt_state(
             a.proposals_after if a else {},
             a.boundary if a else set(),
+            a.peer_has if a else None,
             a.converged_this_tick if a else None,
             a.correction_this_tick if a else None,
         ) if a else ""
@@ -609,6 +658,7 @@ def _(dag_a, dag_b, dag_info, mo, run_duplex_reconciliation):
         b_state = _fmt_state(
             b.proposals_after if b else {},
             b.boundary if b else set(),
+            b.peer_has if b else None,
             b.converged_this_tick if b else None,
             b.correction_this_tick if b else None,
         ) if b else ""
@@ -630,18 +680,22 @@ def _(dag_a, dag_b, dag_info, mo, run_duplex_reconciliation):
         final = records[-1] if records else None
         if final and not final.proposals_after:
             bnd = final.boundary
-            delta = my_dag.forward_walk(bnd)
-            actual = [d for d in delta if not peer_dag.has(d)]
-            wasted = [d for d in delta if peer_dag.has(d)]
+            full_walk = my_dag.forward_walk(bnd)
+            filtered_delta = [d for d in full_walk if d not in final.peer_has]
+            skipped = [d for d in full_walk if d in final.peer_has]
+            actual_needed = [d for d in full_walk if not peer_dag.has(d)]
+            wasted = [d for d in filtered_delta if peer_dag.has(d)]
             peer = "B" if node == "A" else "A"
             lines.append(f"### Result: {node} → {peer}")
             lines.append(f"**Boundary:** `{bnd}`")
-            lines.append(f"**Forward walk (inclusive):** `{delta}`")
+            lines.append(f"**Forward walk (inclusive):** `{full_walk}` ({len(full_walk)} msgs)")
+            lines.append(f"**Skipped (peer has bytes):** `{set(skipped)}` ({len(skipped)} msgs)")
+            lines.append(f"**Delta sent:** `{filtered_delta}` ({len(filtered_delta)} msgs)")
             lines.append(f"**Actual messages {peer} needs:** `{dag_info[only_mine_key]}`")
             if wasted:
-                lines.append(f"**Wasted:** `{set(wasted)}`")
+                lines.append(f"**Wasted (sent but peer has):** `{set(wasted)}`")
             else:
-                lines.append(f"**Exact diff — no wasted messages.**")
+                lines.append(f"**No wasted messages in filtered delta.**")
             lines.append("")
 
     mo.md("\n".join(lines))
