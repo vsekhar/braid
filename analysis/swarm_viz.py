@@ -36,7 +36,7 @@ def _():
 @app.cell
 def _(Path, mo, re):
     _notebook_dir = Path(mo.notebook_dir())
-    LOG_FILE = str(_notebook_dir / "../swarm4.log")
+    LOG_FILE = str(_notebook_dir / "../swarm6.log")
     OUT_DIR = _notebook_dir
 
     RECEIVED_RE = re.compile(
@@ -48,16 +48,6 @@ def _(Path, mo, re):
     CREATED_RE = re.compile(
         r'time=(\S+)\s+level=\S+\s+msg="created message"\s+'
         r'node=([0-9a-f]+)\s+ref=[0-9a-f]+\s+peers=(\d+)\s+incorporated=(\d+)'
-    )
-
-    RESOLVE_RE = re.compile(
-        r'time=(\S+)\s+level=\S+\s+msg="resolving wanted"\s+'
-        r'node=([0-9a-f]+)\s+peer=([0-9a-f]+)\s+sending=(\d+)'
-    )
-
-    WANTED_REQ_RE = re.compile(
-        r'time=(\S+)\s+level=\S+\s+msg="sending wanted request"\s+'
-        r'node=([0-9a-f]+)\s+peer=([0-9a-f]+)\s+wanted=(\d+)\s+frontier=(\d+)'
     )
 
     CONNECT_RE = re.compile(
@@ -74,33 +64,19 @@ def _(Path, mo, re):
         r'time=(\S+)\s+level=\S+\s+msg="shutting down"'
     )
 
-    HW_GAPS_RE = re.compile(
-        r'time=(\S+)\s+level=\S+\s+msg="have/want: discovered gaps"\s+'
-        r'node=([0-9a-f]+)\s+peer=([0-9a-f]+)\s+new_wants=(\d+)'
-    )
-
-    HW_FULFILLED_RE = re.compile(
-        r'time=(\S+)\s+level=\S+\s+msg="have/want: fulfilled wants"\s+'
-        r'node=([0-9a-f]+)\s+peer=([0-9a-f]+)\s+sent=(\d+)'
-    )
-
-    HW_BULK_RE = re.compile(
-        r'time=(\S+)\s+level=\S+\s+msg="have/want: bulk transfer"\s+'
-        r'node=([0-9a-f]+)\s+peer=([0-9a-f]+)\s+sent=(\d+)'
+    PROBE_DELTA_RE = re.compile(
+        r'time=(\S+)\s+level=\S+\s+msg="probe: sending delta"\s+'
+        r'node=([0-9a-f]+)\s+peer=([0-9a-f]+)\s+boundary=(\d+)\s+sent=(\d+)'
     )
     return (
         CONNECT_RE,
         CREATED_RE,
         DISCONNECT_RE,
-        HW_BULK_RE,
-        HW_FULFILLED_RE,
-        HW_GAPS_RE,
         LOG_FILE,
         OUT_DIR,
+        PROBE_DELTA_RE,
         RECEIVED_RE,
-        RESOLVE_RE,
         SHUTDOWN_RE,
-        WANTED_REQ_RE,
     )
 
 
@@ -109,14 +85,10 @@ def _(
     CONNECT_RE,
     CREATED_RE,
     DISCONNECT_RE,
-    HW_BULK_RE,
-    HW_FULFILLED_RE,
-    HW_GAPS_RE,
     LOG_FILE,
+    PROBE_DELTA_RE,
     RECEIVED_RE,
-    RESOLVE_RE,
     SHUTDOWN_RE,
-    WANTED_REQ_RE,
     datetime,
     defaultdict,
 ):
@@ -128,19 +100,14 @@ def _(
 
     def parse_log(path):
         """Parse all event types from the log."""
-        received = defaultdict(list)   # node -> [(t, incorporated, pending, wanted)]
-        created = defaultdict(list)    # node -> [(t, peers, incorporated)]
-        resolved = defaultdict(list)   # node -> [(t, peer, sending)]
-        wanted_reqs = defaultdict(list) # node -> [(t, peer, wanted_count)]
-        connections = defaultdict(set)  # node -> set of connected peer IDs
-        hw_gaps = defaultdict(list)     # node -> [(t, peer, new_wants)]
-        hw_fulfilled = defaultdict(list) # node -> [(t, peer, sent)]
-        hw_bulk = defaultdict(list)     # node -> [(t, peer, sent)]
+        received = defaultdict(list)       # node -> [(t, incorporated, pending, wanted)]
+        created = defaultdict(list)        # node -> [(t, peers, incorporated)]
+        connections = defaultdict(set)     # node -> set of connected peer IDs
+        probe_deltas = defaultdict(list)   # node -> [(t, peer, boundary, sent)]
         shutdown_t = None
         t0 = None
         with open(path) as f:
             for line in f:
-                # Check for shutdown marker
                 _m = SHUTDOWN_RE.search(line)
                 if _m:
                     _elapsed, t0 = parse_timestamp(_m.group(1), t0)
@@ -159,35 +126,11 @@ def _(
                     elapsed, t0 = parse_timestamp(ts_str, t0)
                     created[_node].append((elapsed, int(peers), int(inc)))
                     continue
-                m = RESOLVE_RE.search(line)
+                m = PROBE_DELTA_RE.search(line)
                 if m:
-                    ts_str, _node, _peer, sending = m.groups()
+                    ts_str, _node, _peer, _boundary, _sent = m.groups()
                     elapsed, t0 = parse_timestamp(ts_str, t0)
-                    resolved[_node].append((elapsed, _peer, int(sending)))
-                    continue
-                m = WANTED_REQ_RE.search(line)
-                if m:
-                    ts_str, _node, _peer, wanted_count, _frontier = m.groups()
-                    elapsed, t0 = parse_timestamp(ts_str, t0)
-                    wanted_reqs[_node].append((elapsed, _peer, int(wanted_count)))
-                    continue
-                m = HW_GAPS_RE.search(line)
-                if m:
-                    ts_str, _node, _peer, _new_wants = m.groups()
-                    elapsed, t0 = parse_timestamp(ts_str, t0)
-                    hw_gaps[_node].append((elapsed, _peer, int(_new_wants)))
-                    continue
-                m = HW_FULFILLED_RE.search(line)
-                if m:
-                    ts_str, _node, _peer, _sent = m.groups()
-                    elapsed, t0 = parse_timestamp(ts_str, t0)
-                    hw_fulfilled[_node].append((elapsed, _peer, int(_sent)))
-                    continue
-                m = HW_BULK_RE.search(line)
-                if m:
-                    ts_str, _node, _peer, _sent = m.groups()
-                    elapsed, t0 = parse_timestamp(ts_str, t0)
-                    hw_bulk[_node].append((elapsed, _peer, int(_sent)))
+                    probe_deltas[_node].append((elapsed, _peer, int(_boundary), int(_sent)))
                     continue
                 m = CONNECT_RE.search(line)
                 if m:
@@ -203,30 +146,18 @@ def _(
                     if shutdown_t is None or elapsed < shutdown_t:
                         connections[_node].discard(_peer)
                     continue
-        return (received, created, resolved, wanted_reqs, connections, hw_gaps, hw_fulfilled, hw_bulk)
-    received, created, resolved, wanted_reqs, connections, hw_gaps, hw_fulfilled, hw_bulk = parse_log(LOG_FILE)
-    _hw_total = (sum(len(v) for v in hw_gaps.values())
-               + sum(len(v) for v in hw_fulfilled.values())
-               + sum(len(v) for v in hw_bulk.values()))
-    _hw_msgs_sent = (sum(r[2] for v in hw_fulfilled.values() for r in v)
-                   + sum(r[2] for v in hw_bulk.values() for r in v))
+        return (received, created, connections, probe_deltas)
+    received, created, connections, probe_deltas = parse_log(LOG_FILE)
+    _delta_count = sum(len(v) for v in probe_deltas.values())
+    _delta_msgs = sum(r[3] for v in probe_deltas.values() for r in v)
+    _delta_boundary = sum(r[2] for v in probe_deltas.values() for r in v)
     print(f'Received:     {sum(len(v) for v in received.values())} entries across {len(received)} nodes')
     print(f'Created:      {sum(len(v) for v in created.values())} entries across {len(created)} nodes')
-    print(f'Have/want:    {_hw_total} events ({sum(len(v) for v in hw_gaps.values())} gaps, '
-          f'{sum(len(v) for v in hw_fulfilled.values())} fulfilled, '
-          f'{sum(len(v) for v in hw_bulk.values())} bulk), '
-          f'{_hw_msgs_sent} messages sent')
+    print(f'Probe deltas: {_delta_count} events, '
+          f'{_delta_msgs} messages sent, '
+          f'{_delta_boundary} total boundary refs')
     print(f'Connections:  {sum(len(v) for v in connections.values()) // 2} edges across {len(connections)} nodes')
-    return (
-        connections,
-        created,
-        hw_bulk,
-        hw_fulfilled,
-        hw_gaps,
-        received,
-        resolved,
-        wanted_reqs,
-    )
+    return connections, created, probe_deltas, received
 
 
 @app.cell
@@ -335,56 +266,42 @@ def _(OUT_DIR, created, plt, received):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## Have/want sync activity
+    ## DAGdiff sync activity
 
-    Shows the three have/want event types over time:
-    - **Discovered gaps** (red): unrecognized `have` refs became new `want` entries
-    - **Fulfilled wants** (green): messages sent in response to peer's `want` refs
-    - **Bulk transfer** (blue): larger batch sends to catch up a peer
+    Shows converged probe events over time:
+    - **Boundary size** (top): number of boundary refs the algorithm converged on
+    - **Delta size** (bottom): number of messages sent via forward walk from boundary
     """)
     return
 
 
 @app.cell
-def _(OUT_DIR, hw_bulk, hw_fulfilled, hw_gaps, plt):
-    _fig, _axes = plt.subplots(3, 1, figsize=(14, 8), sharex=True)
+def _(OUT_DIR, plt, probe_deltas):
+    _fig, _axes = plt.subplots(2, 1, figsize=(14, 6), sharex=True)
 
-    # Discovered gaps
-    for _node in sorted(hw_gaps):
-        _data = hw_gaps[_node]
+    for _node in sorted(probe_deltas):
+        _data = probe_deltas[_node]
         _t = [r[0] for r in _data]
-        _v = [r[2] for r in _data]
-        _axes[0].scatter(_t, _v, label=_node, s=10, alpha=0.5)
-    _axes[0].set_ylabel('new wants')
-    _axes[0].set_title('Discovered gaps (unrecognized have refs)')
+        _boundary = [r[2] for r in _data]
+        _axes[0].scatter(_t, _boundary, label=_node, s=10, alpha=0.5)
+    _axes[0].set_ylabel('boundary refs')
+    _axes[0].set_title('DAGdiff boundary size per convergence')
     _axes[0].legend(fontsize=6, ncol=5, loc='upper right')
     _axes[0].grid(True, alpha=0.3)
 
-    # Fulfilled wants
-    for _node in sorted(hw_fulfilled):
-        _data = hw_fulfilled[_node]
+    for _node in sorted(probe_deltas):
+        _data = probe_deltas[_node]
         _t = [r[0] for r in _data]
-        _v = [r[2] for r in _data]
-        _axes[1].scatter(_t, _v, label=_node, s=10, alpha=0.5)
+        _sent = [r[3] for r in _data]
+        _axes[1].scatter(_t, _sent, label=_node, s=10, alpha=0.5)
     _axes[1].set_ylabel('messages sent')
-    _axes[1].set_title('Fulfilled wants (messages sent to peer)')
+    _axes[1].set_title('Delta size (forward walk from boundary)')
+    _axes[1].set_xlabel('time (seconds from start)')
     _axes[1].legend(fontsize=6, ncol=5, loc='upper right')
     _axes[1].grid(True, alpha=0.3)
 
-    # Bulk transfer
-    for _node in sorted(hw_bulk):
-        _data = hw_bulk[_node]
-        _t = [r[0] for r in _data]
-        _v = [r[2] for r in _data]
-        _axes[2].scatter(_t, _v, label=_node, s=10, alpha=0.5)
-    _axes[2].set_ylabel('messages sent')
-    _axes[2].set_title('Bulk transfers (larger catch-up batches)')
-    _axes[2].set_xlabel('time (seconds from start)')
-    _axes[2].legend(fontsize=6, ncol=5, loc='upper right')
-    _axes[2].grid(True, alpha=0.3)
-
     _fig.tight_layout()
-    _fig.savefig(OUT_DIR / 'out_havewant.png', dpi=100)
+    _fig.savefig(OUT_DIR / 'out_probe_sync.png', dpi=100)
     _fig
     return
 
@@ -426,14 +343,13 @@ def _(mo):
     ## Behind vs. caught-up node classification
 
     Classify nodes as "behind" or "caught up" based on whether their pending count exceeds a threshold
-    in the second half of the run. Then check whether behind nodes are asking other behind nodes for help.
+    in the second half of the run. Then check whether probe sync is flowing from caught-up nodes to behind nodes.
     """)
     return
 
 
 @app.cell
-def _(OUT_DIR, plt, received, resolved, wanted_reqs):
-    # Classify nodes: "behind" if their average pending in the last half exceeds threshold
+def _(OUT_DIR, plt, probe_deltas, received):
     BEHIND_THRESHOLD = 200
     all_nodes = sorted(received.keys())
     max_t = max(r[0] for node in received.values() for r in node)
@@ -448,67 +364,50 @@ def _(OUT_DIR, plt, received, resolved, wanted_reqs):
     behind_nodes = {n for n, s in node_status.items() if s == 'behind'}
     caught_up_nodes = {n for n, s in node_status.items() if s == 'caught up'}
 
-    # For each wanted request from a behind node, check if the peer it asked is also behind
-    ask_behind = []  # (t, node) — asked a behind peer
-    ask_caught = []  # (t, node) — asked a caught-up peer
-    for _node in behind_nodes:
-        for _t, _peer, _count in wanted_reqs.get(_node, []):
-            if _t > half_t:
-                if _peer in behind_nodes:
-                    ask_behind.append((_t, _node))
+    # Count deltas by sender status → receiver status
+    send_behind_to_behind = []   # (t, sent)
+    send_caught_to_behind = []   # (t, sent)
+    for _sender in all_nodes:
+        for _t, _receiver, _boundary, _sent in probe_deltas.get(_sender, []):
+            if _t > half_t and _receiver in behind_nodes:
+                if _sender in behind_nodes:
+                    send_behind_to_behind.append((_t, _sent))
                 else:
-                    ask_caught.append((_t, _node))
-
-    total_asks = len(ask_behind) + len(ask_caught)
-    pct_behind = 100 * len(ask_behind) / total_asks if total_asks > 0 else 0
-
-    # For resolve responses TO behind nodes, check if responder was behind or caught-up
-    resolve_from_behind = []   # (t, sending) — behind node resolved for a behind requester
-    resolve_from_caught = []   # (t, sending) — caught-up node resolved for a behind requester
-
-    # "resolving wanted" is logged by the RESPONDER, with the peer being the REQUESTER
-    for _responder in all_nodes:
-        for _t, _requester, _sending in resolved.get(_responder, []):
-            if _t > half_t and _requester in behind_nodes:
-                if _responder in behind_nodes:
-                    resolve_from_behind.append((_t, _sending))
-                else:
-                    resolve_from_caught.append((_t, _sending))
+                    send_caught_to_behind.append((_t, _sent))
 
     _fig, _axes = plt.subplots(1, 2, figsize=(14, 5))
 
-    # Left: pie chart of who behind nodes asked
-    if total_asks > 0:
+    total_sends = len(send_behind_to_behind) + len(send_caught_to_behind)
+    if total_sends > 0:
         _axes[0].pie(
-            [len(ask_behind), len(ask_caught)],
-            labels=[f'Asked behind peer\n({len(ask_behind)})', f'Asked caught-up peer\n({len(ask_caught)})'],
+            [len(send_behind_to_behind), len(send_caught_to_behind)],
+            labels=[f'Behind sender\n({len(send_behind_to_behind)})', f'Caught-up sender\n({len(send_caught_to_behind)})'],
             colors=['#e74c3c', '#2ecc71'],
             autopct='%1.0f%%',
             startangle=90
         )
-        _axes[0].set_title(f'Who do behind nodes ask for help?\n(second half, {total_asks} requests)')
+        _axes[0].set_title(f'Who sends deltas to behind nodes?\n(second half, {total_sends} deltas)')
     else:
         _axes[0].text(0.5, 0.5, f'No behind nodes\n({len(caught_up_nodes)} caught up)',
                       ha='center', va='center', fontsize=14, color='#2ecc71')
-        _axes[0].set_title('Who do behind nodes ask for help?')
+        _axes[0].set_title('Who sends deltas to behind nodes?')
 
-    # Right: box plot of resolve batch sizes by responder type
     _bp_data = []
     _bp_labels = []
-    if resolve_from_behind:
-        _bp_data.append([s for _, s in resolve_from_behind])
-        _bp_labels.append(f'Behind responder\n(n={len(resolve_from_behind)})')
-    if resolve_from_caught:
-        _bp_data.append([s for _, s in resolve_from_caught])
-        _bp_labels.append(f'Caught-up responder\n(n={len(resolve_from_caught)})')
+    if send_behind_to_behind:
+        _bp_data.append([s for _, s in send_behind_to_behind])
+        _bp_labels.append(f'Behind sender\n(n={len(send_behind_to_behind)})')
+    if send_caught_to_behind:
+        _bp_data.append([s for _, s in send_caught_to_behind])
+        _bp_labels.append(f'Caught-up sender\n(n={len(send_caught_to_behind)})')
     if _bp_data:
-        _axes[1].boxplot(_bp_data, labels=_bp_labels)
-    _axes[1].set_ylabel('messages sent per resolve')
-    _axes[1].set_title('Resolve batch size by responder status')
+        _axes[1].boxplot(_bp_data, tick_labels=_bp_labels)
+    _axes[1].set_ylabel('messages sent per delta')
+    _axes[1].set_title('Delta batch size by sender status')
     _axes[1].grid(True, alpha=0.3)
 
     _fig.suptitle(
-        f'Behind nodes: {", ".join(sorted(behind_nodes))} | '
+        f'Behind nodes: {", ".join(sorted(behind_nodes)) or "(none)"} | '
         f'Caught up: {", ".join(sorted(caught_up_nodes))}',
         fontsize=8, y=0.02
     )
@@ -522,18 +421,17 @@ def _(OUT_DIR, plt, received, resolved, wanted_reqs):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## Wanted request timeline: who asks whom
+    ## Delta timeline: who sends to behind nodes
 
-    Shows each wanted request from a behind node as a dot, colored by whether the peer asked
-    was also behind (red) or caught up (green). Wasted cycles (asking a behind peer) cluster
-    together, showing how behind nodes get stuck asking each other.
+    Shows each DAGdiff delta directed at a behind node, colored by whether
+    the sender was also behind (red) or caught up (green). Dot size is proportional to delta size.
     """)
     return
 
 
 @app.cell
-def _(OUT_DIR, plt, received, wanted_reqs):
-    BEHIND_THRESHOLD_2 = 200
+def _(OUT_DIR, plt, probe_deltas, received):
+    _BEHIND_THRESHOLD = 200
     _all_nodes = sorted(received.keys())
     _max_t = max(r[0] for node in received.values() for r in node)
     _half_t = _max_t / 2
@@ -542,34 +440,37 @@ def _(OUT_DIR, plt, received, wanted_reqs):
     for _n in _all_nodes:
         _late_pending = [r[2] for r in received[_n] if r[0] > _half_t]
         _avg_pending = sum(_late_pending) / len(_late_pending) if _late_pending else 0
-        _node_status[_n] = 'behind' if _avg_pending > BEHIND_THRESHOLD_2 else 'caught up'
+        _node_status[_n] = 'behind' if _avg_pending > _BEHIND_THRESHOLD else 'caught up'
     _behind = {n for n, s in _node_status.items() if s == 'behind'}
 
     _fig, _ax = plt.subplots(figsize=(14, 5))
-    _y_map = {n: i for i, n in enumerate(sorted(_behind))}
 
-    for _n in sorted(_behind):
-        for _t, _peer, _count in wanted_reqs.get(_n, []):
-            _color = '#e74c3c' if _peer in _behind else '#2ecc71'
-            _ax.scatter(_t, _y_map[_n], c=_color, s=max(3, _count / 5), alpha=0.5)
+    if _behind:
+        _y_map = {n: i for i, n in enumerate(sorted(_behind))}
+        for _sender in _all_nodes:
+            for _t, _receiver, _boundary, _sent in probe_deltas.get(_sender, []):
+                if _receiver in _behind:
+                    _color = '#e74c3c' if _sender in _behind else '#2ecc71'
+                    _ax.scatter(_t, _y_map[_receiver], c=_color, s=max(3, _sent * 2), alpha=0.5)
+        _ax.set_yticks(list(_y_map.values()))
+        _ax.set_yticklabels(list(_y_map.keys()), fontsize=8)
+    else:
+        _ax.text(0.5, 0.5, 'No behind nodes', ha='center', va='center', fontsize=14, color='#2ecc71')
 
-    _ax.set_yticks(list(_y_map.values()))
-    _ax.set_yticklabels(list(_y_map.keys()), fontsize=8)
     _ax.set_xlabel('time (seconds from start)')
-    _ax.set_ylabel('behind node')
-    _ax.set_title('Wanted requests from behind nodes (red=asked behind peer, green=asked caught-up peer)')
+    _ax.set_ylabel('behind node (receiver)')
+    _ax.set_title('Deltas to behind nodes (red=behind sender, green=caught-up sender)')
     _ax.grid(True, alpha=0.3)
 
-    # Legend
     from matplotlib.lines import Line2D
     _ax.legend(
         [Line2D([0], [0], marker='o', color='w', markerfacecolor='#e74c3c', markersize=8),
          Line2D([0], [0], marker='o', color='w', markerfacecolor='#2ecc71', markersize=8)],
-        ['Asked behind peer', 'Asked caught-up peer'],
+        ['Behind sender', 'Caught-up sender'],
         fontsize=8, loc='upper left'
     )
     _fig.tight_layout()
-    _fig.savefig(OUT_DIR / 'out_wanted_timeline.png', dpi=100)
+    _fig.savefig(OUT_DIR / 'out_probe_timeline.png', dpi=100)
     _fig
     return
 

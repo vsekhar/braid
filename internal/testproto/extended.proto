@@ -17,7 +17,8 @@ message ExtendedEnvelope {
   oneof body {
     bytes message = 1;
     bytes peer_gossip = 2;
-    bytes message_request = 3;
+    bytes probe_request = 3;
+    bytes probe_response = 4;
     FutureMessage future = 100;
   }
 }

@@ -8,6 +8,13 @@ import (
 	"time"
 )
 
+// dagdiffProposal is a search cursor in the DAGdiff boundary-detection algorithm.
+type dagdiffProposal struct {
+	direction int // +1 (toward frontier) or -1 (toward genesis)
+	magnitude int // step size (positive)
+	rng       int // -1 = expansion phase, >=0 = narrowing range
+}
+
 // Peer represents a connected peer.
 type Peer struct {
 	Key         *PublicKey
@@ -15,19 +22,12 @@ type Peer struct {
 	ConnectedAt time.Time
 	sendCh      chan *Envelope
 
-	// sharedFrontier tracks refs known to be on both sides of this
-	// connection. It is only accessed from the peer's readLoop goroutine.
-	sharedFrontier map[string]struct{}
-}
-
-// advanceSharedFrontier adds a ref to the shared frontier and removes any of
-// its parents that were previously in the frontier. This keeps the shared
-// frontier minimal — only the tips of the known-shared region.
-func (p *Peer) advanceSharedFrontier(key string, msg *Message) {
-	p.sharedFrontier[key] = struct{}{}
-	for _, entry := range msg.GetParents().GetEntries() {
-		delete(p.sharedFrontier, refKey(entry.GetParent()))
-	}
+	// DAGdiff reconciliation state. Only accessed from readLoop goroutine.
+	// nil when no probe is in progress; initialized lazily on first response.
+	proposals map[string]dagdiffProposal // refKey → search cursor
+	hits      map[string]struct{}        // refs peer confirmed having
+	misses    map[string]struct{}        // refs peer confirmed not having
+	boundary  map[string]struct{}        // converged boundary (deepest misses)
 }
 
 // Enqueue adds an envelope to the peer's send queue. Returns false if the

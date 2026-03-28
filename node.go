@@ -3,6 +3,7 @@ package braid
 import (
 	"context"
 	"crypto/tls"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net"
@@ -15,7 +16,7 @@ import (
 const messageInterval = 500 * time.Millisecond
 const gossipInterval = 7 * time.Second
 const connectInterval = 3 * time.Second
-const haveWantInterval = 2 * time.Second
+const probeInterval = 2 * time.Second
 const targetConnections = 8
 const targetConnectionsEpsilon = 2
 
@@ -125,9 +126,9 @@ func (n *Node) Run(ctx context.Context) error {
 		n.connectLoop(ctx)
 	})
 
-	// Have/want synchronization loop.
+	// Probe-based synchronization loop.
 	n.wg.Go(func() {
-		n.haveWantLoop(ctx)
+		n.probeLoop(ctx)
 	})
 
 	// Message creation loop.
@@ -167,11 +168,10 @@ func (n *Node) addPeer(ctx context.Context, conn net.Conn, listenAddr string) {
 	n.directory.Add(peerKey, listenAddr)
 	n.directory.ResetErrors(peerKey)
 	p := &Peer{
-		Key:            peerKey,
-		Conn:           conn,
-		ConnectedAt:    time.Now(),
-		sendCh:         make(chan *Envelope, 8192),
-		sharedFrontier: make(map[string]struct{}),
+		Key:         peerKey,
+		Conn:        conn,
+		ConnectedAt: time.Now(),
+		sendCh:      make(chan *Envelope, 8192),
 	}
 	n.peers.Add(p)
 	n.logger.Info("connected", "peer", publicKeyID(peerKey)[:8])
@@ -218,10 +218,10 @@ func (n *Node) readLoop(ctx context.Context, p *Peer) {
 			n.handleMessage(p, body.Message)
 		case *Envelope_PeerGossip:
 			n.handleGossip(body.PeerGossip)
-		case *Envelope_MessageRequest:
-			n.handleMessageRequest(p, body.MessageRequest)
-		case *Envelope_HaveWant:
-			n.handleHaveWant(p, body.HaveWant)
+		case *Envelope_ProbeRequest:
+			n.handleProbeRequest(p, body.ProbeRequest)
+		case *Envelope_ProbeResponse:
+			n.handleProbeResponse(p, body.ProbeResponse)
 		default:
 			unknown := env.ProtoReflect().GetUnknown()
 			num, typ, length := protowire.ConsumeField(unknown)
@@ -238,6 +238,8 @@ func (n *Node) handleMessage(p *Peer, msg *Message) {
 		return
 	}
 	if !result.IsNew {
+		n.logger.Info("duplicate message", "ref", refKey(result.Ref)[:8],
+			"peer", publicKeyID(p.Key)[:8])
 		return
 	}
 	n.logger.Info("received message", "ref", refKey(result.Ref)[:8],
@@ -256,130 +258,226 @@ func (n *Node) handleGossip(gossip *PeerGossip) {
 	}
 }
 
-func (n *Node) handleMessageRequest(p *Peer, req *MessageRequest) {
-	msgs := n.store.Resolve(req.Wanted, req.Frontier)
-	if len(msgs) == 0 {
+func (n *Node) handleProbeRequest(p *Peer, req *ProbeRequest) {
+	// Classify each probed ref. Use Get (incorporated only) so the
+	// boundary detection treats pending messages as missing.
+	var have, want []*MessageRef
+	for _, ref := range req.GetHave() {
+		if _, ok := n.store.Get(ref); ok {
+			have = append(have, ref)
+		} else {
+			want = append(want, ref)
+		}
+	}
+	if len(have) == 0 && len(want) == 0 {
 		return
 	}
-	n.logger.Info("resolving wanted", "peer", publicKeyID(p.Key)[:8], "sending", len(msgs))
-	for _, msg := range msgs {
-		env := &Envelope{
-			Body: &Envelope_Message{Message: msg},
+	p.Enqueue(&Envelope{
+		Body: &Envelope_ProbeResponse{
+			ProbeResponse: &ProbeResponse{Have: have, Want: want},
+		},
+	})
+}
+
+func (n *Node) handleProbeResponse(p *Peer, resp *ProbeResponse) {
+	// Initialize DAGdiff state on first response for this probe round.
+	if p.proposals == nil {
+		p.proposals = make(map[string]dagdiffProposal)
+		p.hits = make(map[string]struct{})
+		p.misses = make(map[string]struct{})
+		p.boundary = make(map[string]struct{})
+		for _, ref := range resp.GetHave() {
+			p.proposals[refKey(ref)] = dagdiffProposal{direction: -1, magnitude: 1, rng: -1}
 		}
-		if !p.Enqueue(env) {
-			return
+		for _, ref := range resp.GetWant() {
+			p.proposals[refKey(ref)] = dagdiffProposal{direction: -1, magnitude: 1, rng: -1}
+		}
+	}
+
+	// Cache responses.
+	for _, ref := range resp.GetHave() {
+		k := refKey(ref)
+		p.hits[k] = struct{}{}
+		delete(p.misses, k)
+	}
+	for _, ref := range resp.GetWant() {
+		k := refKey(ref)
+		p.misses[k] = struct{}{}
+		delete(p.hits, k)
+	}
+
+	// Update all proposals against the cache.
+	newProposals := make(map[string]dagdiffProposal)
+	for k, prop := range p.proposals {
+		n.processProposal(p, k, prop.direction, prop.magnitude, prop.rng, newProposals)
+	}
+	p.proposals = newProposals
+
+	if len(p.proposals) == 0 {
+		// Converged — forward walk from boundary (inclusive) = delta.
+		if len(p.boundary) > 0 {
+			msgs := n.store.ForwardWalkInclusive(p.boundary)
+			for _, msg := range msgs {
+				ref, _ := HashMessage(msg)
+				k := refKey(ref)
+				if !p.Enqueue(&Envelope{Body: &Envelope_Message{Message: msg}}) {
+					break
+				}
+				// Mark sent refs as hits so re-probes don't re-send
+				// messages still in the TCP pipeline (#4).
+				p.hits[k] = struct{}{}
+				delete(p.misses, k)
+			}
+			if len(msgs) > 0 {
+				n.logger.Info("probe: sending delta", "peer", publicKeyID(p.Key)[:8],
+					"boundary", len(p.boundary), "sent", len(msgs))
+			}
+		}
+		// If we sent a delta, immediately start a new round to chase
+		// convergence at network speed (#1). Keep hits/misses cache
+		// across rounds so sent-but-undelivered refs are treated as
+		// shared (#4). If boundary was empty (peer is caught up),
+		// go idle and let probeLoop start the next cycle.
+		p.proposals = nil
+		if len(p.boundary) > 0 {
+			p.boundary = nil
+			n.startProbe(p)
+		} else {
+			p.boundary = nil
+		}
+	} else {
+		// Send next ProbeRequest with remaining proposals.
+		refs := make([]*MessageRef, 0, len(p.proposals))
+		for k := range p.proposals {
+			b, _ := hex.DecodeString(k)
+			refs = append(refs, &MessageRef{Sha256V1: b})
+		}
+		p.Enqueue(&Envelope{
+			Body: &Envelope_ProbeRequest{
+				ProbeRequest: &ProbeRequest{Have: refs},
+			},
+		})
+	}
+}
+
+// processProposal updates a single DAGdiff proposal against the cached
+// hits/misses. It may recurse for new proposals that have cached responses.
+func (n *Node) processProposal(p *Peer, ref string, direction, magnitude, rng int, out map[string]dagdiffProposal) {
+	_, isHit := p.hits[ref]
+	_, isMiss := p.misses[ref]
+
+	if !isHit && !isMiss {
+		// No response yet — carry forward unchanged.
+		out[ref] = dagdiffProposal{direction, magnitude, rng}
+		return
+	}
+
+	respDir := 1
+	if isMiss {
+		respDir = -1
+	}
+
+	var nextMag, nextRng int
+	if rng < 0 {
+		// Expansion phase.
+		if direction == respDir {
+			nextMag = magnitude * 2
+			nextRng = -1
+		} else {
+			nextRng = magnitude
+			nextMag = magnitude / 2
+		}
+	} else {
+		// Narrowing phase.
+		nextMag = rng / 2
+		nextRng = nextMag
+	}
+
+	if nextMag == 0 {
+		// Converged.
+		if isMiss {
+			p.boundary[ref] = struct{}{}
+		} else {
+			// Correction: probe children to find exact boundary.
+			for _, childKey := range n.store.Walk(ref, 1) {
+				if _, ok := p.boundary[childKey]; !ok {
+					if _, ok := out[childKey]; !ok {
+						n.processProposal(p, childKey, 1, 1, 1, out)
+					}
+				}
+			}
+		}
+	} else {
+		// Walk to next position; shorten hop if it goes off the DAG.
+		walkMag := nextMag
+		var reached []string
+		for walkMag > 0 {
+			reached = n.store.Walk(ref, respDir*walkMag)
+			if len(reached) > 0 {
+				break
+			}
+			walkMag /= 2
+			if nextRng >= 0 {
+				nextRng = walkMag
+			}
+		}
+		if len(reached) > 0 {
+			for _, r := range reached {
+				if _, ok := p.boundary[r]; !ok {
+					if _, ok := out[r]; !ok {
+						n.processProposal(p, r, respDir, walkMag, nextRng, out)
+					}
+				}
+			}
+		} else if isMiss {
+			p.boundary[ref] = struct{}{}
 		}
 	}
 }
 
-func (n *Node) haveWantLoop(ctx context.Context) {
-	ticker := time.NewTicker(haveWantInterval)
+func (n *Node) probeLoop(ctx context.Context) {
+	ticker := time.NewTicker(probeInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			n.sendHaveWant()
+			n.sendProbe()
 		}
 	}
 }
 
-func (n *Node) sendHaveWant() {
+func (n *Node) sendProbe() {
 	frontier := n.store.Frontier()
-	wanted := n.store.Wanted()
-	if len(frontier) == 0 && len(wanted) == 0 {
+	if len(frontier) == 0 {
+		return
+	}
+	for _, p := range n.peers.All() {
+		// probeLoop is the fresh-start path: clear the cache so stale
+		// hits don't suppress needed sends.
+		p.hits = nil
+		p.misses = nil
+		p.proposals = nil
+		p.boundary = nil
+		n.startProbe(p)
+	}
+}
+
+// startProbe sends a ProbeRequest with the current frontier for a single peer.
+func (n *Node) startProbe(p *Peer) {
+	frontier := n.store.Frontier()
+	if len(frontier) == 0 {
 		return
 	}
 	env := &Envelope{
-		Body: &Envelope_HaveWant{
-			HaveWant: &HaveWant{
+		Body: &Envelope_ProbeRequest{
+			ProbeRequest: &ProbeRequest{
 				Have: frontier,
-				Want: wanted,
 			},
 		},
 	}
-	for _, p := range n.peers.All() {
-		p.Enqueue(env)
-	}
-}
-
-func (n *Node) handleHaveWant(p *Peer, hw *HaveWant) {
-	// Process have refs: recognized refs grow the shared frontier,
-	// unrecognized refs become our wants.
-	var newWants []*MessageRef
-	var newKeys []string
-	for _, ref := range hw.GetHave() {
-		k := refKey(ref)
-		if msg, ok := n.store.Get(ref); ok {
-			// Incorporated — use as shared frontier.
-			p.advanceSharedFrontier(k, msg)
-			newKeys = append(newKeys, k)
-		} else if !n.store.Has(ref) {
-			// Neither incorporated nor pending — we want it.
-			newWants = append(newWants, ref)
-		}
-		// Pending refs are recognized (not added to wants) but can't
-		// serve as shared frontier since we lack children pointers.
-	}
-	// advanceSharedFrontier only removes direct parents. When the peer's
-	// frontier advances multiple hops between ticks, older entries survive
-	// as stale ancestors causing ResolveForward to resend messages the
-	// peer already has. Walk backward from new entries to prune them.
-	if len(newKeys) > 0 {
-		n.store.PruneAncestors(p.sharedFrontier, newKeys)
-	}
-	if len(newWants) > 0 {
-		n.store.AddWanted(newWants)
-		n.logger.Info("have/want: discovered gaps", "peer", publicKeyID(p.Key)[:8],
-			"new_wants", len(newWants))
-	}
-
-	// Bulk transfer: walk forward from shared frontier through children,
-	// sending all descendant messages the peer is missing.
-	sentKeys := make(map[string]struct{})
-	if len(p.sharedFrontier) > 0 {
-		msgs, keys := n.store.ResolveForward(p.sharedFrontier)
-		for i, msg := range msgs {
-			env := &Envelope{
-				Body: &Envelope_Message{Message: msg},
-			}
-			if !p.Enqueue(env) {
-				break
-			}
-			sentKeys[keys[i]] = struct{}{}
-			p.advanceSharedFrontier(keys[i], msg)
-		}
-		if len(sentKeys) > 0 {
-			n.logger.Info("have/want: bulk transfer", "peer", publicKeyID(p.Key)[:8],
-				"sent", len(sentKeys))
-		}
-	}
-
-	// Fulfill individual want refs not covered by the forward walk.
-	var fulfilled int
-	for _, ref := range hw.GetWant() {
-		k := refKey(ref)
-		if _, ok := sentKeys[k]; ok {
-			continue
-		}
-		msg, ok := n.store.Get(ref)
-		if !ok {
-			continue
-		}
-		env := &Envelope{
-			Body: &Envelope_Message{Message: msg},
-		}
-		if !p.Enqueue(env) {
-			break
-		}
-		p.advanceSharedFrontier(k, msg)
-		fulfilled++
-	}
-	if fulfilled > 0 {
-		n.logger.Info("have/want: fulfilled wants", "peer", publicKeyID(p.Key)[:8],
-			"sent", fulfilled)
-	}
+	p.Enqueue(env)
 }
 
 func (n *Node) connectLoop(ctx context.Context) {

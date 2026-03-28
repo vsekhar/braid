@@ -67,20 +67,18 @@ message PeerGossip {
   repeated PeerInfo peers = 1;
 }
 
-// MessageRequest is sent by a node to request messages it needs.
-// The responding node walks backward from the wanted refs, stopping
-// at the requester's frontier, and streams back any messages it has.
-message MessageRequest {
-  repeated MessageRef wanted = 1;
-  repeated MessageRef frontier = 2;
+// ProbeRequest is sent to a peer to ask which of the sender's refs the
+// peer has. The listed refs are the sender's current proposals (search
+// cursors in the DAGdiff boundary-detection algorithm).
+message ProbeRequest {
+  repeated MessageRef have = 1;
 }
 
-// HaveWant is exchanged continuously between peers to discover what each
-// is missing. 'have' refs describe the sender's state (proposed cut);
-// 'want' refs are messages the sender needs. Unrecognized have refs
-// become wants for the receiver; fulfillable want refs are sent as
-// regular Message protobufs on the data plane.
-message HaveWant {
+// ProbeResponse answers a ProbeRequest. 'have' lists refs the responder
+// already has; 'want' lists refs the responder is missing. Together they
+// let the requester narrow the boundary between shared and unshared
+// regions of the DAG.
+message ProbeResponse {
   repeated MessageRef have = 1;
   repeated MessageRef want = 2;
 }
@@ -92,7 +90,7 @@ message Envelope {
   oneof body {
     Message message = 1;
     PeerGossip peer_gossip = 2;
-    MessageRequest message_request = 3;
-    HaveWant have_want = 4;
+    ProbeRequest probe_request = 3;
+    ProbeResponse probe_response = 4;
   }
 }

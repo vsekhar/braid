@@ -291,145 +291,86 @@ func (s *Store) Wanted() []*MessageRef {
 
 const maxResolve = 5000
 
-// PruneAncestors removes entries from frontier that are ancestors of any
-// entry in newKeys. It walks backward through all parent pointers to find
-// and remove stale entries. Entries on independent branches (not ancestors
-// of any newKey) are preserved. The walk is O(V) in the worst case but
-// uses a shared visited set so overlapping ancestry is traversed only once.
-func (s *Store) PruneAncestors(frontier map[string]struct{}, newKeys []string) {
+// Walk traverses the DAG from the given refKey by |hops| steps.
+// Positive hops walk forward (children), negative walk backward (parents).
+// Returns the set of refKeys reached at exactly |hops| distance, or nil
+// if the walk goes off the edge of the DAG.
+func (s *Store) Walk(key string, hops int) []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	visited := make(map[string]struct{})
-	var queue []string
-	for _, k := range newKeys {
-		visited[k] = struct{}{}
-		queue = append(queue, k)
+	mag := hops
+	if mag < 0 {
+		mag = -mag
+	}
+	if mag == 0 {
+		if _, ok := s.vertices[key]; ok {
+			return []string{key}
+		}
+		return nil
 	}
 
-	for len(queue) > 0 {
-		k := queue[0]
-		queue = queue[1:]
-		v, ok := s.vertices[k]
-		if !ok {
-			continue
-		}
-		for _, entry := range v.msg.GetParents().GetEntries() {
-			pk := refKey(entry.GetParent())
-			if _, ok := visited[pk]; ok {
+	current := map[string]struct{}{key: {}}
+	for range mag {
+		next := make(map[string]struct{})
+		for k := range current {
+			v, ok := s.vertices[k]
+			if !ok {
 				continue
 			}
-			visited[pk] = struct{}{}
-			delete(frontier, pk)
-			queue = append(queue, pk)
+			if hops > 0 {
+				for _, child := range v.children {
+					next[child.key] = struct{}{}
+				}
+			} else {
+				for _, parent := range v.parents {
+					next[parent.key] = struct{}{}
+				}
+			}
 		}
+		if len(next) == 0 {
+			return nil
+		}
+		current = next
 	}
+
+	result := make([]string, 0, len(current))
+	for k := range current {
+		result = append(result, k)
+	}
+	return result
 }
 
-// ResolveForward walks forward from the shared frontier through children
-// pointers, collecting descendant messages. These are messages the peer is
-// missing on branches covered by the shared frontier. Returns messages and
-// their refKeys (same order), capped at maxResolve.
-func (s *Store) ResolveForward(sharedFrontier map[string]struct{}) (msgs []*Message, keys []string) {
+// ForwardWalkInclusive BFS-walks forward from the boundary refs (inclusive),
+// collecting all descendant messages. Returns messages capped at maxResolve.
+func (s *Store) ForwardWalkInclusive(boundary map[string]struct{}) []*Message {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	visited := make(map[string]struct{})
 	var queue []*vertex
+	var result []*Message
 
-	// Seed with children of shared frontier refs that aren't already in
-	// the shared frontier.
-	for k := range sharedFrontier {
+	for k := range boundary {
 		v, ok := s.vertices[k]
 		if !ok {
 			continue
 		}
-		for _, child := range v.children {
-			if _, ok := sharedFrontier[child.key]; ok {
-				continue
-			}
-			if _, ok := visited[child.key]; ok {
-				continue
-			}
-			visited[child.key] = struct{}{}
-			queue = append(queue, child)
-		}
-	}
-
-	for len(queue) > 0 && len(msgs) < maxResolve {
-		v := queue[0]
-		queue = queue[1:]
-		msgs = append(msgs, v.msg)
-		keys = append(keys, v.key)
-		for _, child := range v.children {
-			if _, ok := visited[child.key]; ok {
-				continue
-			}
-			visited[child.key] = struct{}{}
-			queue = append(queue, child)
-		}
-	}
-
-	return msgs, keys
-}
-
-// Resolve walks backward from the wanted refs through incorporated and
-// pending messages, stopping at refs in the frontier set or when the walk
-// cap is reached. Returns the collected messages (no particular order).
-// The caller streams these to the requesting node.
-func (s *Store) Resolve(wanted []*MessageRef, frontier []*MessageRef) []*Message {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	// Build frontier lookup set.
-	stop := make(map[string]struct{}, len(frontier))
-	for _, ref := range frontier {
-		stop[refKey(ref)] = struct{}{}
-	}
-
-	visited := make(map[string]struct{})
-	var result []*Message
-
-	// BFS backward from wanted.
-	queue := make([]string, 0, len(wanted))
-	for _, ref := range wanted {
-		k := refKey(ref)
-		if _, ok := visited[k]; ok {
-			continue
-		}
-		if _, ok := stop[k]; ok {
-			continue
-		}
 		visited[k] = struct{}{}
-		queue = append(queue, k)
+		queue = append(queue, v)
+		result = append(result, v.msg)
 	}
 
 	for len(queue) > 0 && len(result) < maxResolve {
-		k := queue[0]
+		v := queue[0]
 		queue = queue[1:]
-
-		// Check incorporated vertices first, then pending.
-		var msg *Message
-		if n, ok := s.vertices[k]; ok {
-			msg = n.msg
-		} else if pm, ok := s.pending[k]; ok {
-			msg = pm
-		}
-		if msg == nil {
-			continue
-		}
-		result = append(result, msg)
-
-		for _, entry := range msg.GetParents().GetEntries() {
-			pk := refKey(entry.GetParent())
-			if _, ok := visited[pk]; ok {
+		for _, child := range v.children {
+			if _, ok := visited[child.key]; ok {
 				continue
 			}
-			if _, ok := stop[pk]; ok {
-				continue
-			}
-			visited[pk] = struct{}{}
-			queue = append(queue, pk)
+			visited[child.key] = struct{}{}
+			queue = append(queue, child)
+			result = append(result, child.msg)
 		}
 	}
 
@@ -446,24 +387,6 @@ func (s *Store) Has(ref *MessageRef) bool {
 	}
 	_, ok := s.pending[k]
 	return ok
-}
-
-// AddWanted adds refs to the wanted set. This is used by the have/want
-// protocol to request refs that a peer has but this node does not.
-func (s *Store) AddWanted(refs []*MessageRef) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, ref := range refs {
-		k := refKey(ref)
-		// Only add if we don't already have it.
-		if _, ok := s.vertices[k]; ok {
-			continue
-		}
-		if _, ok := s.pending[k]; ok {
-			continue
-		}
-		s.wanted[k] = struct{}{}
-	}
 }
 
 // Len returns the number of incorporated messages.
